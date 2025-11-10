@@ -1,0 +1,128 @@
+[common]
+# set to true for console debug output
+console=false
+
+# set font file, which is located in `data` folder
+# leave empty to use embedded font, which only supports Latin characters
+font=""
+
+# font size
+font_size=42
+
+# accpeted charsets:
+#  enUS, frFR, deDE, esES, esAR, itIT, ptBr -> Latin
+#  jaJP -> Japanese
+#  koKR -> Korean
+#  plPL -> Latin with extra characters used by Polish
+#  ruRU -> Cyrillic
+#  thTH -> Thai
+#  zhCN, zhTW -> CJK
+# Leave empty to use engus
+charset=""
+
+# language used to load data file, if you set this to empty, engus will be used
+language=""
+
+[input]
+# You can bind any of the following key names:
+# Use uppercase names. Combine multiple keys with '+', e.g. CTRL+SHIFT+F1
+#
+# --- Modifier keys ---
+#   CTRL, LCTRL, RCTRL, SHIFT, LSHIFT, RSHIFT, ALT, LALT, RALT, WIN, LWIN, RWIN
+#
+# --- Mouse buttons ---
+#   LBUTTON, RBUTTON, MBUTTON, XBUTTON1, XBUTTON2
+#
+# --- Navigation & control ---
+#   BACK, BACKSPACE, TAB, RETURN, ENTER, ESC, ESCAPE,
+#   SPACE, INSERT, DELETE, HOME, END, PRIOR, PAGEUP, NEXT, PAGEDOWN,
+#   LEFT, RIGHT, UP, DOWN
+#
+# --- Function keys ---
+#   F1, F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12
+#
+# --- Letters (A–Z) ---
+#   A, B, C, D, E, F, G, H, I, J, K, L, M, N, O, P, Q, R, S, T, U, V, W, X, Y, Z
+#
+# --- Number row (0–9) ---
+#   0, 1, 2, 3, 4, 5, 6, 7, 8, 9, HYPHEN (- or MINUS)
+#
+# --- Numpad keys ---
+#   NUMPAD0–NUMPAD9, NUM0–NUM9,
+#   DECIMAL (NUMPADPERIOD), DIVIDE (/), MULTIPLY (*), SUBTRACT (NUMPADSUBTRACT), ADD (+), EQUAL (=)
+#
+# --- Lock keys ---
+#   CAPSLOCK, CAPITAL, NUMLOCK, SCROLL, SCROLLLOCK
+#
+# --- Symbols ---
+#   ',', ';', "'", '[', ']', '\\', '~', '.' (PERIOD)
+#
+# --- Misc / System ---
+#   PRINT, PRINTSCREEN, SNAPSHOT, PAUSE
+#
+# Example:
+#   toggle_full_mode = "F1"
+#   unload = "CTRL+SHIFT+F12"
+#
+# Notes:
+# - F13–F24 and other OEM / multimedia keys are NOT supported.
+# - Ensure no spaces around '+' in combined bindings.
+
+# shortcut key to toggle full mode
+toggle_full_mode="="
+# shortcut key to trigger a mouse click
+click_action="-"
+
+[style]
+# text color (Red,Green,Blue,Alpha)
+text_color=[255,255,255,250]
+# check mark color (Red,Green,Blue,Alpha)
+check_mark_color=[138,43,226,230]
+# background color (Red,Green,Blue,Alpha)
+bg_color=[18,18,30,220]
+# border color (Red,Green,Blue,Alpha)
+border_color=[180,0,255,180]
+# button color (Red,Green,Blue,Alpha)
+button_color=[30,0,60,150]
+# button hover color (Red,Green,Blue,Alpha)
+button_hover_color=[50,50,120,170]
+# button press color (Red,Green,Blue,Alpha)
+button_press_color=[70,20,120,230]
+# node color (Red,Green,Blue,Alpha)
+node_color=[15,15,30,160]
+# node hover color (Red,Green,Blue,Alpha)
+node_hover_color=[45,45,90,160]
+# node press color (Red,Green,Blue,Alpha)
+node_press_color=[65,25,100,180]
+# scroll bar background color (Red,Green,Blue,Alpha)
+scroll_bg_color=[20,20,40,160]
+# scroll bar color (Red,Green,Blue,Alpha)
+scroll_color=[80,80,160,160]
+# scroll bar hover color (Red,Green,Blue,Alpha)
+scroll_hover_color=[100,100,200,180]
+# scroll bar press color (Red,Green,Blue,Alpha)
+scroll_press_color=[140,100,220,200]
+# border width
+border_width=1
+# window rounding radius
+rounding=7
+# panel position (x, y) in units of pixels
+panel_pos=[-10,10]
+# panel dimension (width, height) in units of fraction of screen width/height
+panel_dim=[0.20, 0.92]
+
+[boss]
+# data filename for boss list, which is located in `data/<language>` folder
+data_file="bosses.json"
+
+[overlay]
+# how to display the text on the overlay
+# display text = "IGT: {igt}$nBosses: {kills}/{total}$nGreat Runes: {runes}$nShards: {shards}$nDeaths: {deaths}"
+#  $n = newline
+#  {kills} = current kill count
+#  {total} = total boss count
+#  {deaths}= Death count in current game
+#  {igt}   = In-game time
+#  {shards}= Number of messmer's kindling shards acquired
+#  {runes} = Number of great runes acquired
+display_text = "IGT: {igt}$nBosses: {kills}/{total}$nGreat Runes: {runes}$nShards: {shards}$nDeaths: {deaths}"
