@@ -1,7 +1,7 @@
 use std::{
     fmt::Write,
     sync::{Arc, RwLock, atomic::{AtomicBool}},
-    time::Instant,
+    time::{Instant, Duration},
     collections::HashMap
 };
 
@@ -23,6 +23,7 @@ use crate::{
 
 pub struct EROverlayUi {
     last_click_time: Instant,
+    last_toggle_time: Instant,
     timer_buf: String,
     full_mode: bool,
 
@@ -58,7 +59,7 @@ impl EROverlayUi {
             .and_then(|i| i.click_action.clone())
             .map(|s| parse_key_combo(&s)); // parse_key_combo returns Vec<Key>
 
-        let language_opt = config
+        let language = config
             .as_ref()
             .and_then(|c| c.common.as_ref())
             .and_then(|cc| cc.language.as_ref())
@@ -66,11 +67,20 @@ impl EROverlayUi {
             .filter(|s| !s.is_empty())
             .unwrap_or("engus");
 
+        let data_file = config
+            .as_ref()
+            .and_then(|c| c.boss.as_ref())
+            .and_then(|cc| cc.data_file.as_ref())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("bosses.json");
+
         let boss_regions = get_dll_directory()
-            .and_then(|dir| load_localized_boss_data(&dir, language_opt));
+            .and_then(|dir| load_localized_boss_data(&dir, language, data_file));
 
         Self {
             last_click_time: Instant::now(),
+            last_toggle_time: Instant::now(),
             timer_buf: String::with_capacity(32),
             full_mode: false,
             config,
@@ -121,6 +131,18 @@ impl EROverlayUi {
 
         let lines = format_display_text(template, &vars);
         Self::render_centered_text_block(ui, &lines);
+
+        let total_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
+
+        if Self::is_click_in_header(ui, total_h) {
+            let now = Instant::now();
+            if now.duration_since(self.last_toggle_time) > Duration::from_millis(300) {
+                self.full_mode = true;
+                self.last_toggle_time = now;
+                debug_log!("[ignite_overlay] Clicked compact overlay — expanding");
+            }
+        }
+
     }
 
     fn render_open(&mut self, ui: &Ui) {
@@ -159,44 +181,61 @@ impl EROverlayUi {
             .unwrap_or(DEFAULT_DISPLAY_TEXT);
 
         let lines = format_display_text(template, &vars);
-        for line in lines {
+        for line in lines.clone() {
             ui.text(line);
         }
 
-        // Draw region tree + boss checkboxes
-        if let Some(data) = self.boss_regions.as_ref() {
-            if let Ok(state) = self.state.read() {
-                let flags = &state.event_flags;
-                for region in data {
-                    let defeated = region
-                        .bosses
-                        .iter()
-                        .filter(|b| *flags.get(&b.flag_id).unwrap_or(&false))
-                        .count();
-                    let total = region.bosses.len();
+        let header_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
+        if Self::is_click_in_header(ui, header_h) {
+            let now = Instant::now();
+            if now.duration_since(self.last_toggle_time) > Duration::from_millis(300) {
+                self.full_mode = false;
+                self.last_toggle_time = now;
+                debug_log!("[ignite_overlay] Clicked header — collapsing overlay");
+            }
+        }
 
-                    if ui.collapsing_header(
-                        format!("{} ({}/{})", region.region_name, defeated, total),
-                        imgui::TreeNodeFlags::empty(),
-                    ) {
-                        for boss in &region.bosses {
-                            let mut checked = *flags.get(&boss.flag_id).unwrap_or(&false);
-                            ui.checkbox(
-                                &format!(
-                                    "{}{}",
-                                    boss.boss,
-                                    if boss.place.is_empty() {
-                                        "".to_string()
-                                    } else {
-                                        format!(" ({})", boss.place)
-                                    }
-                                ),
-                                &mut checked,
-                            );
+        let avail = ui.content_region_avail();
+        let child = ui.child_window("BossListRegion")
+            .size(avail)
+            .border(false)
+            .begin();
+
+        if let Some(_child_token) = child {
+            // --- Scrollable boss list content ---
+            if let Some(data) = self.boss_regions.as_ref() {
+                if let Ok(state) = self.state.read() {
+                    let flags = &state.event_flags;
+                    for region in data {
+                        let defeated = region
+                            .bosses
+                            .iter()
+                            .filter(|b| *flags.get(&b.flag_id).unwrap_or(&false))
+                            .count();
+                        let total = region.bosses.len();
+
+                        if let Some(_t) = ui
+                            .tree_node_config(format!("{} ({}/{})", region.region_name, defeated, total))
+                            .flags(imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH)
+                            .push()
+                        {
+                            for boss in &region.bosses {
+                                let mut checked = *flags.get(&boss.flag_id).unwrap_or(&false);
+                                ui.checkbox(
+                                    &format!(
+                                        "{}{}",
+                                        boss.boss,
+                                        if boss.place.is_empty() { "" } else { " " }
+                                    ),
+                                    &mut checked,
+                                );
+                            }
                         }
                     }
                 }
             }
+
+            _child_token.end();
         }
     }
 
@@ -267,17 +306,6 @@ impl EROverlayUi {
         }
     }
 
-    fn collect_boss_flags(&self) -> Vec<i32> {
-        self.boss_regions
-            .as_ref()
-            .map(|regions| {
-                regions.iter()
-                    .flat_map(|r| r.bosses.iter().map(|b| b.flag_id))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    }
-
     fn config_dim(&self) -> (f32, f32) {
         self.config
             .as_ref()
@@ -317,6 +345,33 @@ impl EROverlayUi {
         io.add_mouse_button_event(MouseButton::Left, false);
 
         debug_log!("[ignite_overlay] Simulated mouse click");
+    }
+
+    fn is_click_in_header(ui: &imgui::Ui, header_height: f32) -> bool {
+        let io = ui.io();
+        if !io.mouse_down[0] { // only left click
+            return false;
+        }
+        let mouse_pos = io.mouse_pos;
+        let win_pos = ui.window_pos();
+        let win_size = ui.window_size();
+
+        // Check if mouse is inside the window
+        let inside_x = mouse_pos[0] >= win_pos[0] && mouse_pos[0] <= win_pos[0] + win_size[0];
+        let inside_y = mouse_pos[1] >= win_pos[1] && mouse_pos[1] <= win_pos[1] + header_height;
+        inside_x && inside_y
+    }
+
+
+    fn collect_boss_flags(&self) -> Vec<i32> {
+        self.boss_regions
+            .as_ref()
+            .map(|regions| {
+                regions.iter()
+                    .flat_map(|r| r.bosses.iter().map(|b| b.flag_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 }
 

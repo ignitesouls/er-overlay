@@ -44,18 +44,18 @@ pub type BossRegions = Vec<RegionData>;
 ///
 /// Search order:
 /// 1️⃣ `data/<language>/bosses.json`
-/// 2️⃣ `data/enUS/bosses.json`
+/// 2️⃣ `data/engus/bosses.json`
 /// 3️⃣ `data/bosses.json`
-pub fn load_localized_boss_data(config_dir: &PathBuf, language: &str) -> Option<BossRegions> {
+pub fn load_localized_boss_data(config_dir: &PathBuf, language: &str, data_file: &str) -> Option<BossRegions> {
     // normalize language (trim + lowercase for directory consistency)
     let lang_norm = language.trim();
     let lang_norm = if lang_norm.is_empty() { "engus" } else { lang_norm };
 
     // construct candidate search order
     let candidates = [
-        config_dir.join(format!("data/{}/bosses.json", lang_norm)),
-        config_dir.join("data/enUS/bosses.json"),
-        config_dir.join("data/bosses.json"),
+        config_dir.join(format!("data/{}/{}", lang_norm, data_file)),
+        config_dir.join(format!("data/engus/{}", data_file)),
+        config_dir.join(format!("data/{}", data_file)),
     ];
 
     for path in candidates {
