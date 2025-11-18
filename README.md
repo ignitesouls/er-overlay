@@ -38,6 +38,11 @@ Want to help shape the overlay? Join the [Ignite discord](https://discord.gg/ign
 
 ---
 
+### Credits
+- [Sully-](https://github.com/Sully-): for showing me hudhook, sharing code examples, and helping me with debugging the overlay
+- [hudhook](https://github.com/veeenu/hudhook): a rust crate for creating in-game UI overlays, made by Andrea
+- [fromsoftware-rs](https://github.com/vswarte/fromsoftware-rs): a collection of rust crates for interacting with elden ring specifically, made by Vswarte
+
 ## Licensing
 
 SPDX-License-Identifier: GPL-3.0-only
