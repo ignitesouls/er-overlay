@@ -8,10 +8,11 @@ use std::{
 use hudhook::ImguiRenderLoop;
 use imgui::{Ui, Key};
 
+
 use crate::{
     debug_log,
     overlay::{core::start_game_monitor, data::{AppState, BossRegions, create_state, load_localized_boss_data},
-    style::{DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, apply_common_config, apply_style_config, parse_key_combo, read_config}},
+    style::{DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config, apply_style_config, parse_key_combo, read_config}},
     util::{debug::attach_console, introspection::get_dll_directory, text_formatter::format_display_text}
 };
 
@@ -36,6 +37,10 @@ pub struct EROverlayUi {
     state: Arc<RwLock<AppState>>,
     igt: Arc<RwLock<u32>>,
     boss_regions: Option<BossRegions>,
+
+    timer_mode: TimerMode,
+    prep_time_ms: u32,
+    timer_target_ms: u32,
 
     monitor_stop: Arc<AtomicBool>,
 }
@@ -78,6 +83,24 @@ impl EROverlayUi {
         let boss_regions = get_dll_directory()
             .and_then(|dir| load_localized_boss_data(&dir, language, data_file));
 
+        let timer_mode = config
+            .as_ref()
+            .and_then(|c| c.timer.as_ref())
+            .map(|t| t.mode)
+            .unwrap_or(TimerMode::Regular);
+
+        let prep_time_ms = config
+            .as_ref()
+            .and_then(|c| c.timer.as_ref())
+            .and_then(|t| t.prep_minutes)
+            .unwrap_or(0) * 60_000;
+
+        let timer_target_ms = config
+            .as_ref()
+            .and_then(|c| c.timer.as_ref())
+            .and_then(|t| t.timer_minutes)
+            .unwrap_or(0) * 60_000;
+
         Self {
             last_click_time: Instant::now(),
             last_toggle_time: Instant::now(),
@@ -90,6 +113,9 @@ impl EROverlayUi {
             boss_regions,
             state: create_state(),
             igt: Arc::new(RwLock::new(0)),
+            timer_mode,
+            prep_time_ms,
+            timer_target_ms,
             monitor_stop: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -289,10 +315,57 @@ impl EROverlayUi {
     // ----------------------------------------------------
     //
 
+    /* 
     fn write_igt(&mut self) {
         self.timer_buf.clear();
         if let Ok(ms) = self.igt.read() {
-            let total = *ms / 1000;
+
+
+            let raw_ms = *ms as i64;
+            let prep_ms = self.prep_time_ms as i64;
+            let timer_target = self.timer_target_ms as i64;
+
+            let display_ms = match self.timer_mode {
+
+                TimerMode::Regular => raw_ms,
+
+                TimerMode::Timer => {
+                    if raw_ms >= self.timer_target_ms {
+                        0
+                    } else {
+                        self.timer_target_ms - raw_ms
+                    }
+                }
+
+                TimerMode::Prep => {
+                    if raw_ms < self.prep_time_ms {
+                        self.prep_time_ms - raw_ms
+                    } else {
+                        raw_ms - self.prep_time_ms
+                    }
+                }
+
+                TimerMode::PrepTimer => {
+                    if raw_ms < self.prep_time_ms {
+                        self.prep_time_ms - raw_ms
+                    } else {
+                        let after_prep = raw_ms - self.prep_time_ms;
+
+                        if after_prep >= self.timer_target_ms {
+                            0
+                        } else {
+                            self.timer_target_ms - after_prep
+                        }
+                    }
+                }
+            };
+
+            let total_seconds = display_ms / 1000;
+            let is_negative = total_seconds < 0;
+            let total_seconds = total_seconds.abs();
+            
+            // let total = *ms / 1000;
+
             if total > 86400 {
                 let (days, rem_d) = (total / 86_400, total % 86_400);
                 let (hours, rem_h) = (rem_d / 3_600, rem_d % 3_600);
@@ -302,6 +375,98 @@ impl EROverlayUi {
                 let (hours, rem_h) = (total / 3_600, total % 3_600);
                 let (minutes, seconds) = (rem_h / 60, rem_h % 60);
                 let _ = write!(self.timer_buf, "{:02}:{:02}:{:02}", hours, minutes, seconds);
+            }
+        }
+    }
+    */
+
+    fn write_igt(&mut self) {
+        self.timer_buf.clear();
+
+        if let Ok(ms) = self.igt.read() {
+
+            // Convert everything to signed for negative support
+            let raw_ms = *ms as i64;
+            let prep_ms = self.prep_time_ms as i64;
+            let timer_target = self.timer_target_ms as i64;
+
+            // Determine what should be displayed
+            let display_ms: i64 = match self.timer_mode {
+
+                TimerMode::Regular => raw_ms,
+
+                TimerMode::Timer => {
+                    timer_target - raw_ms
+                }
+
+                TimerMode::Prep => {
+                    // Negative during prep, positive afterward
+                    raw_ms - prep_ms
+                }
+
+                TimerMode::PrepTimer => {
+                    if raw_ms < prep_ms {
+                        // Negative during prep
+                        raw_ms - prep_ms
+                    } else {
+                        let after_prep = raw_ms - prep_ms;
+                        timer_target - after_prep
+                    }
+                }
+            };
+
+            // Convert to seconds
+            let total_seconds = display_ms / 1000;
+            let is_negative = total_seconds < 0;
+            let total_seconds = total_seconds.abs();
+
+            // Format as DD:HH:MM:SS if over a day
+            if total_seconds > 86_400 {
+
+                let days = total_seconds / 86_400;
+                let rem_d = total_seconds % 86_400;
+
+                let hours = rem_d / 3_600;
+                let rem_h = rem_d % 3_600;
+
+                let minutes = rem_h / 60;
+                let seconds = rem_h % 60;
+
+                if is_negative {
+                    let _ = write!(
+                        self.timer_buf,
+                        "-{:02}:{:02}:{:02}:{:02}",
+                        days, hours, minutes, seconds
+                    );
+                } else {
+                    let _ = write!(
+                        self.timer_buf,
+                        "{:02}:{:02}:{:02}:{:02}",
+                        days, hours, minutes, seconds
+                    );
+                }
+
+            } else {
+
+                let hours = total_seconds / 3_600;
+                let rem_h = total_seconds % 3_600;
+
+                let minutes = rem_h / 60;
+                let seconds = rem_h % 60;
+
+                if is_negative {
+                    let _ = write!(
+                        self.timer_buf,
+                        "-{:02}:{:02}:{:02}",
+                        hours, minutes, seconds
+                    );
+                } else {
+                    let _ = write!(
+                        self.timer_buf,
+                        "{:02}:{:02}:{:02}",
+                        hours, minutes, seconds
+                    );
+                }
             }
         }
     }

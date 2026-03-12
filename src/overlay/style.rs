@@ -9,6 +9,7 @@ pub const DEFAULT_PANEL_DIM: [f32; 2] = [0.17, 0.92];
 pub const DEFAULT_PANEL_POS: [f32; 2] = [-10.0, 10.0];
 pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}$n";
 
+
 #[derive(Debug, Deserialize)]
 pub struct Common {
     pub console: Option<bool>,
@@ -57,6 +58,22 @@ pub struct Overlay {
     pub display_text: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum TimerMode {
+    Regular,
+    Timer,
+    Prep,
+    PrepTimer,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TimerConfig {
+    pub mode: TimerMode,
+    pub prep_minutes: Option<u32>,
+    pub timer_minutes: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct IgniteConfig {
     pub common: Option<Common>,
@@ -64,6 +81,7 @@ pub struct IgniteConfig {
     pub style: Option<Style>,
     pub boss: Option<Boss>,
     pub overlay: Option<Overlay>,
+    pub timer: Option<TimerConfig>,
 }
 
 pub fn read_config() -> Result<IgniteConfig, String> {
