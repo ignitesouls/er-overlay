@@ -6,7 +6,7 @@ use std::{
 };
 
 use hudhook::ImguiRenderLoop;
-use imgui::{Ui, Key};
+use imgui::{Ui, Key, TextureId};
 
 
 use crate::{
@@ -15,6 +15,8 @@ use crate::{
     style::{DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config, apply_style_config, parse_key_combo, read_config}},
     util::{debug::attach_console, introspection::get_dll_directory, text_formatter::format_display_text}
 };
+
+const LOGO_PNG: &[u8] = include_bytes!("../../Formula_Rando.png");
 
 //
 // ----------------------------------------------------
@@ -43,6 +45,8 @@ pub struct EROverlayUi {
     timer_target_ms: u32,
 
     monitor_stop: Arc<AtomicBool>,
+
+    logo_tex: Option<TextureId>,
 }
 
 impl EROverlayUi {
@@ -117,10 +121,17 @@ impl EROverlayUi {
             prep_time_ms,
             timer_target_ms,
             monitor_stop: Arc::new(AtomicBool::new(false)),
+
+            logo_tex: None
         }
     }
 
-    fn render_closed(&mut self, ui: &Ui) {
+    fn render_closed(&mut self, ui: &Ui, closed_h: f32, closed_w: f32) {
+
+        if let Some(tex_id) = self.logo_tex {
+            imgui::Image::new(tex_id, [closed_w - 16.0, (closed_w - 16.0) / 3.0]).build(ui);
+        }
+
         self.write_igt();
         let mut death_count: u32 = 0;
         let mut shard_count: u32 = 0;
@@ -171,7 +182,12 @@ impl EROverlayUi {
 
     }
 
-    fn render_open(&mut self, ui: &Ui) {
+    fn render_open(&mut self, ui: &Ui, closed_h: f32, closed_w: f32) {
+
+        if let Some(tex_id) = self.logo_tex {
+            imgui::Image::new(tex_id, [closed_w - 16.0, (closed_w - 16.0) / 3.0]).build(ui);
+        }
+
         self.write_igt();
         let mut death_count: u32 = 0;
         let mut shard_count: u32 = 0;
@@ -315,71 +331,6 @@ impl EROverlayUi {
     // ----------------------------------------------------
     //
 
-    /* 
-    fn write_igt(&mut self) {
-        self.timer_buf.clear();
-        if let Ok(ms) = self.igt.read() {
-
-
-            let raw_ms = *ms as i64;
-            let prep_ms = self.prep_time_ms as i64;
-            let timer_target = self.timer_target_ms as i64;
-
-            let display_ms = match self.timer_mode {
-
-                TimerMode::Regular => raw_ms,
-
-                TimerMode::Timer => {
-                    if raw_ms >= self.timer_target_ms {
-                        0
-                    } else {
-                        self.timer_target_ms - raw_ms
-                    }
-                }
-
-                TimerMode::Prep => {
-                    if raw_ms < self.prep_time_ms {
-                        self.prep_time_ms - raw_ms
-                    } else {
-                        raw_ms - self.prep_time_ms
-                    }
-                }
-
-                TimerMode::PrepTimer => {
-                    if raw_ms < self.prep_time_ms {
-                        self.prep_time_ms - raw_ms
-                    } else {
-                        let after_prep = raw_ms - self.prep_time_ms;
-
-                        if after_prep >= self.timer_target_ms {
-                            0
-                        } else {
-                            self.timer_target_ms - after_prep
-                        }
-                    }
-                }
-            };
-
-            let total_seconds = display_ms / 1000;
-            let is_negative = total_seconds < 0;
-            let total_seconds = total_seconds.abs();
-            
-            // let total = *ms / 1000;
-
-            if total > 86400 {
-                let (days, rem_d) = (total / 86_400, total % 86_400);
-                let (hours, rem_h) = (rem_d / 3_600, rem_d % 3_600);
-                let (minutes, seconds) = (rem_h / 60, rem_h % 60);
-                let _ = write!(self.timer_buf, "{:02}:{:02}:{:02}:{:02}", days, hours, minutes, seconds);
-            } else {
-                let (hours, rem_h) = (total / 3_600, total % 3_600);
-                let (minutes, seconds) = (rem_h / 60, rem_h % 60);
-                let _ = write!(self.timer_buf, "{:02}:{:02}:{:02}", hours, minutes, seconds);
-            }
-        }
-    }
-    */
-
     fn write_igt(&mut self) {
         self.timer_buf.clear();
 
@@ -481,18 +432,18 @@ impl EROverlayUi {
     }
 
     fn render_centered_text_block(ui: &imgui::Ui, lines: &[String]) {
-        // Compute total height of all lines (including line spacing)
-        let line_h = ui.text_line_height_with_spacing();
-        let total_h = line_h * lines.len() as f32;
+        // // Compute total height of all lines (including line spacing)
+        // let line_h = ui.text_line_height_with_spacing();
+        // let total_h = line_h * lines.len() as f32;
 
-        // Compute vertical offset for centering in the available region
-        let avail_h = ui.content_region_avail()[1];
-        let y_offset = (avail_h - total_h) * 0.5;
-        if y_offset > 0.0 {
-            let mut pos = ui.cursor_pos();
-            pos[1] += y_offset;
-            ui.set_cursor_pos(pos);
-        }
+        // // Compute vertical offset for centering in the available region
+        // let avail_h = ui.content_region_avail()[1];
+        // let y_offset = (avail_h - total_h) * 0.5;
+        // if y_offset > 0.0 {
+        //     let mut pos = ui.cursor_pos();
+        //     pos[1] += y_offset;
+        //     ui.set_cursor_pos(pos);
+        // }
 
         // Draw lines normally (left-aligned)
         for line in lines {
@@ -558,6 +509,26 @@ impl ImguiRenderLoop for EROverlayUi {
             apply_common_config(imgui, cfg, ctx);
         }
 
+        match image::load_from_memory(LOGO_PNG) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+
+                match ctx.load_texture(rgba.as_raw(), w, h) {
+                    Ok(tex_id) => {
+                        self.logo_tex = Some(tex_id);
+                        debug_log!("[ignite_overlay] ✅ Loaded embedded image");
+                    }
+                    Err(e) => {
+                        debug_log!("[ignite_overlay] ❌ Failed to upload embedded image: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                debug_log!("[ignite_overlay] ❌ Failed to decode embedded image: {:?}", e);
+            }
+        }
+
         // Collect the boss flags you want to monitor
         let flag_ids = self.collect_boss_flags();
         debug_log!("[ignite_overlay] Loaded {} boss flags", flag_ids.len());
@@ -620,6 +591,8 @@ impl ImguiRenderLoop for EROverlayUi {
             (w, h, x, y)
         };
 
+        let (closed_w, closed_h) = self.measure_closed_size(ui);
+
         if self.full_mode {
             // OPEN: fixed size from config
             ui.window("Ignite HUD")
@@ -637,7 +610,7 @@ impl ImguiRenderLoop for EROverlayUi {
                         ui.text_wrapped(err);
                         return;
                     }
-                    self.render_open(ui);
+                    self.render_open(ui, closed_h, closed_w);
                 });
         } else {
             // CLOSED: measure content and anchor to right/bottom correctly
@@ -645,14 +618,16 @@ impl ImguiRenderLoop for EROverlayUi {
                 .as_ref().and_then(|c| c.style.as_ref()).and_then(|s| s.panel_pos)
                 .unwrap_or(DEFAULT_PANEL_POS);
 
-            let (closed_w, closed_h) = self.measure_closed_size(ui);
+            // let (closed_w, closed_h) = self.measure_closed_size(ui);
+
+            let new_closed_h = closed_h + (closed_w - 16.0) / 3.0;
 
             let x = if x_off < 0.0 { screen_w - closed_w + x_off } else { x_off };
             let y = if y_off < 0.0 { screen_h - closed_h + y_off } else { y_off };
 
             ui.window("Ignite HUD")
                 .position([x, y], imgui::Condition::Always)
-                .size([closed_w, closed_h], imgui::Condition::Always)
+                .size([closed_w, new_closed_h], imgui::Condition::Always)
                 .flags(
                     imgui::WindowFlags::NO_TITLE_BAR
                         | imgui::WindowFlags::NO_RESIZE
@@ -665,7 +640,7 @@ impl ImguiRenderLoop for EROverlayUi {
                         ui.text_wrapped(err);
                         return;
                     }
-                    self.render_closed(ui);
+                    self.render_closed(ui, closed_h, closed_w);
                 });
         }
     }
