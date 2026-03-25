@@ -7,7 +7,7 @@ use crate::debug_log;
 
 pub const DEFAULT_PANEL_DIM: [f32; 2] = [0.17, 0.92];
 pub const DEFAULT_PANEL_POS: [f32; 2] = [-10.0, 10.0];
-pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}$n";
+pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}";
 
 #[derive(Debug, Deserialize)]
 pub struct Common {

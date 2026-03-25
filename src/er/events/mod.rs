@@ -2,7 +2,7 @@ use std::{collections::HashMap};
 use fromsoftware_shared::singleton::get_instance;
 use eldenring::cs::{CSEventFlagMan, EventFlag};
 
-// Using Matt's crate. Traverses the event tree for every flag read (can't cache because struct has private fields)
+// Using Vswarte's crate. Traverses the event tree for every flag read (can't cache because struct has private fields)
 #[inline(always)]
 pub fn get_event_flags(flag_ids: &[u32]) -> Option<HashMap<u32, bool>> {
     let flagman = unsafe { get_instance::<CSEventFlagMan>()? };
