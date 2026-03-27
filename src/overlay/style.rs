@@ -87,6 +87,7 @@ pub struct IgniteConfig {
 pub fn read_config() -> Result<IgniteConfig, String> {
     let dll_dir = get_dll_directory()
         .ok_or("Failed to get DLL directory".to_string())?;
+
     let config_path = dll_dir.join("ignite_overlay_config.toml");
 
     let contents = std::fs::read_to_string(&config_path)
@@ -215,7 +216,10 @@ pub fn apply_common_config(
                 .and_then(|c| c.font.as_ref())
                 .filter(|p| !p.is_empty())
             {
-                if let Ok(bytes) = fs::read(path) {
+                let dll_dir = get_dll_directory()
+                    .expect("Failed to get DLL directory");
+                let font_path = dll_dir.join(path);
+                if let Ok(bytes) = fs::read(font_path) {
                     let leaked = Box::leak(bytes.into_boxed_slice());
                     fonts.add_font(&[FontSource::TtfData {
                         data: leaked,
@@ -226,7 +230,10 @@ pub fn apply_common_config(
                     font_used = path.to_string();
                     debug_log!("[ignite_overlay] ✅ Loaded user font '{}'", path);
                 } else {
-                    debug_log!("[ignite_overlay] ⚠ Could not read font '{}'", path);
+                    let dll_dir = get_dll_directory()
+                        .expect("Failed to get DLL directory");
+                    let font_path = dll_dir.join(path);
+                    debug_log!("[ignite_overlay] ⚠ Could not read font '{}'", font_path.display());
                 }
             }
         }

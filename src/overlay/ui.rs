@@ -343,17 +343,16 @@ impl EROverlayUi {
 
             // Determine what should be displayed
             let display_ms: i64 = match self.timer_mode {
-
                 TimerMode::Regular => raw_ms,
 
                 TimerMode::Timer => {
                     timer_target - raw_ms
-                }
+                },
 
                 TimerMode::Prep => {
                     // Negative during prep, positive afterward
                     raw_ms - prep_ms
-                }
+                },
 
                 TimerMode::PrepTimer => {
                     if raw_ms < prep_ms {
