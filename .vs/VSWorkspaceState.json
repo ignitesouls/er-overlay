@@ -1,0 +1,14 @@
+{
+  "ExpandedNodes": [
+    "",
+    "\\src",
+    "\\src\\er",
+    "\\src\\er\\events",
+    "\\src\\er\\gamedata",
+    "\\src\\er\\inventory",
+    "\\src\\overlay",
+    "\\src\\util"
+  ],
+  "SelectedNode": "\\src\\overlay\\style.rs",
+  "PreviewInSolutionExplorer": false
+}

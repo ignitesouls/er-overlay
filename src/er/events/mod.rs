@@ -242,3 +242,58 @@ pub unsafe fn read_from_flag_location(loc: &FlagLocation) -> bool {
 
     (byte_val & bit_mask) != 0
 }
+
+/// Writes flag state directly to a flag's location in memory
+pub unsafe fn write_flag(evt_flag_man: *const u8, flag_id: i32, enabled: bool) -> bool {
+    let Some((base, bit)) = get_event_flag_loc_and_bit(evt_flag_man, flag_id) else {
+        debug_log!(
+            "[ignite_overlay] write_flag failed to resolve location for flag {}",
+            flag_id
+        );
+        return false;
+    };
+
+    if base.is_null() {
+        debug_log!(
+            "[ignite_overlay] write_flag got null base for flag {}",
+            flag_id
+        );
+        return false;
+    }
+
+    let byte_ix = (bit / 8) as usize;
+    let bit_mask = 1u8 << (7 - (bit % 8));
+
+    let byte_ptr = base.add(byte_ix) as *mut u8;
+    let old_val = ptr::read(byte_ptr);
+
+    let new_val = if enabled {
+        old_val | bit_mask
+    } else {
+        old_val & !bit_mask
+    };
+
+    if new_val != old_val {
+        ptr::write(byte_ptr, new_val);
+    }
+
+    let verify = read_u8(byte_ptr as *const u8, "write_flag_verify").unwrap_or_default();
+    let success = if enabled {
+        (verify & bit_mask) != 0
+    } else {
+        (verify & bit_mask) == 0
+    };
+
+    debug_log!(
+        "[ignite_overlay] write_flag flag={} enabled={} byte_ix={} old=0x{:02X} new=0x{:02X} verify=0x{:02X} success={}",
+        flag_id,
+        enabled,
+        byte_ix,
+        old_val,
+        new_val,
+        verify,
+        success
+    );
+
+    success
+}

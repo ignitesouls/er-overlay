@@ -48,9 +48,11 @@ pub struct Style {
     pub panel_dim: Option<[f32; 2]>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct Boss {
     pub data_file: Option<String>,
+    pub schedule_file: Option<String>,
+    pub seed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

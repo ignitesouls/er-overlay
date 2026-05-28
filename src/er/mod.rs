@@ -3,6 +3,8 @@
 pub mod inventory;
 pub mod events;
 pub mod gamedata;
+pub mod grace;
+pub mod stats;
 
 use std::{mem, ptr, slice};
 use winapi::um::winnt::IMAGE_NT_HEADERS64;
