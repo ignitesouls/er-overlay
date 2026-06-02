@@ -1,6 +1,5 @@
 use std::{thread, time::{Duration}, sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}}};
-use eldenring_util::system::wait_for_system_init;
-use fromsoftware_shared::{program::Program};
+// use fromsoftware_shared::{program::Program};
 use crate::{
     debug_log,
     overlay::data::SharedState,
@@ -24,9 +23,9 @@ pub fn start_game_monitor(
     let great_rune_flags = vec![181, 182, 183, 184, 185, 186, 187];
 
     thread::spawn(move || unsafe {
-        // Wait for core systems
-        wait_for_system_init(&Program::current(), Duration::MAX)
-            .expect("Timeout waiting for system init");
+        // // Wait for core systems
+        // wait_for_system_init(&Program::current(), Duration::MAX)
+        //     .expect("Timeout waiting for system init");
 
         // --- Initialization ---
         let mut gamedataman: *const u8 = std::ptr::null();
