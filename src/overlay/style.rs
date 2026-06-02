@@ -9,6 +9,7 @@ pub const DEFAULT_PANEL_DIM: [f32; 2] = [0.17, 0.92];
 pub const DEFAULT_PANEL_POS: [f32; 2] = [-10.0, 10.0];
 pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}";
 
+
 #[derive(Debug, Deserialize)]
 pub struct Common {
     pub console: Option<bool>,
@@ -197,7 +198,10 @@ pub fn apply_common_config(
                 .and_then(|c| c.font.as_ref())
                 .filter(|p| !p.is_empty())
             {
-                if let Ok(bytes) = fs::read(path) {
+                let dll_dir = get_dll_directory()
+                    .expect("Failed to get DLL directory");
+                let font_path = dll_dir.join(path);
+                if let Ok(bytes) = fs::read(font_path) {
                     let leaked = Box::leak(bytes.into_boxed_slice());
                     fonts.add_font(&[FontSource::TtfData {
                         data: leaked,
@@ -208,7 +212,10 @@ pub fn apply_common_config(
                     font_used = path.to_string();
                     debug_log!("[ignite_overlay] ✅ Loaded user font '{}'", path);
                 } else {
-                    debug_log!("[ignite_overlay] ⚠ Could not read font '{}'", path);
+                    let dll_dir = get_dll_directory()
+                        .expect("Failed to get DLL directory");
+                    let font_path = dll_dir.join(path);
+                    debug_log!("[ignite_overlay] ⚠ Could not read font '{}'", font_path.display());
                 }
             }
         }
