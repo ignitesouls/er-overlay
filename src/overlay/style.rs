@@ -154,7 +154,6 @@ fn rgba_u8_to_f32(c: [u8; 4]) -> [f32; 4] {
     ]
 }
 
-
 /// Apply common config (font, size, charset, etc.)
 pub fn apply_common_config(
     imgui: &mut Context,

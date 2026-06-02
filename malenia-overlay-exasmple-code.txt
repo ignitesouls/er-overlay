@@ -1,0 +1,112 @@
+
+pub fn start_malenia_monitor(
+    poll_ms: u64,
+    stop: Arc<AtomicBool>
+) {
+
+    let malenia_is_alive = 11100023;
+    let malenia_was_killed = 11100024;
+
+    // The event flags that we use to track Malenia's "alive" status
+    let flag_ids = vec![malenia_is_alive, malenia_was_killed];
+
+    // How long to wait after the player kills Malenia to respawn her
+    let malenia_duration = Duration::from_secs(60);
+
+    // Spawn a new thread to run our monitoring code
+    thread::spawn(move || unsafe {
+        // --- Initialization ---
+        let mut evtflagman: *const u8 = std::ptr::null();
+        if evtflagman.is_null() {
+            let mut delay = 250;
+            loop {
+                if let Some(evt) = try_resolve_eventflagman() {
+                    evtflagman = evt;
+                    break;
+                }
+                if delay < 2000 { delay *= 2 };
+                thread::sleep(Duration::from_millis(delay));
+            }
+        }
+        let mut entry_size = read_entry_size(evtflagman);
+        while entry_size == 0 && !stop.load(Ordering::SeqCst){
+            debug_log!("[ignite_overlay] EventFlagMan not ready — waiting...");
+            thread::sleep(Duration::from_millis(500));
+            entry_size = read_entry_size(evtflagman);
+        }
+
+        debug_log!(
+            "[ignite_overlay] Flag+IGT monitor started ({} flags, entry_size={})",
+            flag_ids.len(),
+            entry_size
+        );
+
+        let mut last_root = read_root(evtflagman);
+        let mut events_cache = build_cache(evtflagman, &flag_ids);
+
+        let update_interval = Duration::from_millis(poll_ms);
+
+        while !stop.load(Ordering::SeqCst) {
+            // update interval
+            thread::sleep(update_interval);
+
+            // Check that event flag manager and game data manager pointers are valid. Reattach if not.
+            if evtflagman.is_null() {
+                debug_log!("[ignite_overlay] Managers lost — attempting reattach...");
+                evtflagman = std::ptr::null();
+
+                let mut delay = 250;
+                while (evtflagman.is_null()) && !stop.load(Ordering::SeqCst) {
+                    if let (Some(evt), Some(gdm)) = (try_resolve_eventflagman(), try_resolve_gamedataman()) {
+                        evtflagman = evt;
+                        debug_log!("[ignite_overlay] Reattached event manager successfully");
+                        break;
+                    }
+                    if delay < 2000 { delay *= 2; }
+                    thread::sleep(Duration::from_millis(delay));
+                }
+
+                continue;
+            }
+
+            // Initialize or rebuild flag tree. Wait a tick after building cache for stable flag tree.
+            let cur_root = read_root(evtflagman);
+            if cur_root != last_root || events_cache.is_empty() {
+                let new_cache = build_cache(evtflagman, &flag_ids);
+                let confirm_root = read_root(evtflagman);
+
+                if confirm_root == cur_root {
+                    events_cache = new_cache;
+                    last_root = cur_root;
+                    debug_log!("[ignite_overlay] Rebuilt flag caches safely");
+                } else {
+                    debug_log!("[ignite_overlay] Flag tree changed mid-build; retrying next tick");
+                    events_cache.clear();
+                }
+                continue;
+            }
+
+            // malenia is alive
+            if let
+                (Some(alive_loc), Some(was_killed_loc)) =
+                (&events_cache.get(&flag_ids[0]), &events_cache.get(&flag_ids[1]))
+            {
+                let was_killed = read_from_flag_location(was_killed_loc);
+                if (was_killed) {
+                    set_at_flag_location(was_killed_loc, false);
+
+                    // sleep whatever the duration is for malenia to be dead
+                    thread::sleep(malenia_duration);
+                }
+
+                let is_alive = read_from_flag_location(alive_loc);
+                if (!is_alive) {
+                    /* Spawns Malenia */
+
+                }
+            }
+
+        }
+        debug_log!("[ignite_overlay] Monitor thread exiting gracefully");
+    });
+}
