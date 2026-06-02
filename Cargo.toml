@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 eldenring = { git = "https://github.com/vswarte/fromsoftware-rs", package = "eldenring" }
-eldenring-util = { git = "https://github.com/vswarte/fromsoftware-rs", package = "eldenring-util" }
+# eldenring-util = { git = "https://github.com/vswarte/fromsoftware-rs", package = "eldenring-util" }
 fromsoftware_shared = { git = "https://github.com/vswarte/fromsoftware-rs", package = "fromsoftware-shared" }
 serde = { version = "1.0", features = ["derive"] }
 winapi = { version = "0.3.9", features = ["libloaderapi"] }
