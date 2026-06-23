@@ -2,8 +2,8 @@
 
 use std::{ffi::OsString, os::windows::ffi::OsStringExt, path::PathBuf};
 use winapi::shared::minwindef::HMODULE;
-use winapi::um::{
-    libloaderapi::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS},
+use winapi::um::libloaderapi::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GetModuleFileNameW, GetModuleHandleExW,
 };
 
 fn get_own_module_handle() -> Option<HMODULE> {
@@ -15,11 +15,7 @@ fn get_own_module_handle() -> Option<HMODULE> {
             &mut handle,
         )
     };
-    if ok == 0 {
-        None
-    } else {
-        Some(handle)
-    }
+    if ok == 0 { None } else { Some(handle) }
 }
 
 pub fn get_dll_path() -> Option<PathBuf> {

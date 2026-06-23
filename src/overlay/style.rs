@@ -1,14 +1,13 @@
-use std::fs;
-use imgui::{Key, StyleColor, Context, FontConfig, FontSource};
-use serde::Deserialize;
-use crate::overlay::embedded_font::EMBEDDED_FONT;
-use crate::util::introspection::{get_dll_directory};
 use crate::debug_log;
+use crate::overlay::embedded_font::EMBEDDED_FONT;
+use crate::util::introspection::get_dll_directory;
+use imgui::{Context, FontConfig, FontSource, Key, StyleColor};
+use serde::Deserialize;
+use std::fs;
 
 pub const DEFAULT_PANEL_DIM: [f32; 2] = [0.17, 0.92];
 pub const DEFAULT_PANEL_POS: [f32; 2] = [-10.0, 10.0];
 pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}";
-
 
 #[derive(Debug, Deserialize)]
 pub struct Common {
@@ -24,6 +23,7 @@ pub struct Input {
     pub unload: Option<String>,
     pub toggle_full_mode: Option<String>,
     pub click_action: Option<String>,
+    pub reset_run: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,7 +52,23 @@ pub struct Style {
 pub struct Boss {
     pub data_file: Option<String>,
     pub schedule_file: Option<String>,
+    pub profile_file: Option<String>,
     pub seed: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Features {
+    pub overlay: Option<bool>,
+    pub boss_tracking: Option<bool>,
+    pub route_actions: Option<bool>,
+    pub stat_profiles: Option<bool>,
+    pub auto_grace: Option<bool>,
+    pub experimental_item_spawn: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Experimental {
+    pub test_weapon_id: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,13 +98,62 @@ pub struct IgniteConfig {
     pub input: Option<Input>,
     pub style: Option<Style>,
     pub boss: Option<Boss>,
+    pub features: Option<Features>,
+    pub experimental: Option<Experimental>,
     pub overlay: Option<Overlay>,
     pub timer: Option<TimerConfig>,
 }
 
+impl IgniteConfig {
+    pub fn overlay_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.overlay)
+            .unwrap_or(true)
+    }
+
+    pub fn boss_tracking_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.boss_tracking)
+            .unwrap_or(true)
+    }
+
+    pub fn route_actions_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.route_actions)
+            .unwrap_or(false)
+    }
+
+    pub fn stat_profiles_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.stat_profiles)
+            .unwrap_or(false)
+    }
+
+    pub fn auto_grace_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.auto_grace)
+            .unwrap_or(false)
+    }
+
+    pub fn experimental_item_spawn_enabled(&self) -> bool {
+        self.features
+            .as_ref()
+            .and_then(|f| f.experimental_item_spawn)
+            .unwrap_or(false)
+    }
+
+    pub fn test_weapon_id(&self) -> Option<i32> {
+        self.experimental.as_ref().and_then(|e| e.test_weapon_id)
+    }
+}
+
 pub fn read_config() -> Result<IgniteConfig, String> {
-    let dll_dir = get_dll_directory()
-        .ok_or("Failed to get DLL directory".to_string())?;
+    let dll_dir = get_dll_directory().ok_or("Failed to get DLL directory".to_string())?;
     let config_path = dll_dir.join("ignite_overlay_config.toml");
 
     let contents = std::fs::read_to_string(&config_path)
@@ -143,6 +208,12 @@ pub fn apply_style_config(imgui: &mut Context, cfg: &IgniteConfig) {
             style.window_border_size = border_width;
             style.frame_border_size = border_width;
         }
+
+        style.window_padding = [16.0, 14.0];
+        style.frame_padding = [10.0, 7.0];
+        style.item_spacing = [10.0, 8.0];
+        style.item_inner_spacing = [8.0, 6.0];
+        style.scrollbar_size = 10.0;
     }
 }
 
@@ -154,7 +225,6 @@ fn rgba_u8_to_f32(c: [u8; 4]) -> [f32; 4] {
         c[3] as f32 / 255.0,
     ]
 }
-
 
 /// Apply common config (font, size, charset, etc.)
 pub fn apply_common_config(
@@ -181,13 +251,13 @@ pub fn apply_common_config(
             if let Some(charset) = &common.charset {
                 let charset = charset.to_lowercase();
                 let font_path_opt = match charset.as_str() {
-                    "jajp" => Some("C:\\Windows\\Fonts\\meiryo.ttc"),      // Japanese
-                    "kokr" => Some("C:\\Windows\\Fonts\\malgun.ttf"),      // Korean
-                    "zhcn" => Some("C:\\Windows\\Fonts\\msyh.ttc"),        // Simplified Chinese
-                    "zhtw" => Some("C:\\Windows\\Fonts\\mingliu.ttc"),     // Traditional Chinese
-                    "thth" => Some("C:\\Windows\\Fonts\\tahoma.ttf"),      // Thai fallback
-                    "ruru" => Some("C:\\Windows\\Fonts\\arial.ttf"),       // Cyrillic
-                    "plpl" => Some("C:\\Windows\\Fonts\\arial.ttf"),       // Latin extended
+                    "jajp" => Some("C:\\Windows\\Fonts\\meiryo.ttc"), // Japanese
+                    "kokr" => Some("C:\\Windows\\Fonts\\malgun.ttf"), // Korean
+                    "zhcn" => Some("C:\\Windows\\Fonts\\msyh.ttc"),   // Simplified Chinese
+                    "zhtw" => Some("C:\\Windows\\Fonts\\mingliu.ttc"), // Traditional Chinese
+                    "thth" => Some("C:\\Windows\\Fonts\\tahoma.ttf"), // Thai fallback
+                    "ruru" => Some("C:\\Windows\\Fonts\\arial.ttf"),  // Cyrillic
+                    "plpl" => Some("C:\\Windows\\Fonts\\arial.ttf"),  // Latin extended
                     _ => None,
                 };
 
@@ -203,7 +273,11 @@ pub fn apply_common_config(
                         font_used = format!("system charset font: {}", charset);
                         debug_log!("[ignite_overlay] ✅ Loaded charset font '{}'", charset);
                     } else {
-                        debug_log!("[ignite_overlay] ⚠ Charset font '{}' not found at {}", charset, path);
+                        debug_log!(
+                            "[ignite_overlay] ⚠ Charset font '{}' not found at {}",
+                            charset,
+                            path
+                        );
                     }
                 }
             }
@@ -349,18 +423,44 @@ pub fn key_from_name(name: &str) -> Option<Key> {
         "F12" => Some(F12),
 
         // --- Alphabet keys ---
-        "A" => Some(A), "B" => Some(B), "C" => Some(C), "D" => Some(D),
-        "E" => Some(E), "F" => Some(F), "G" => Some(G), "H" => Some(H),
-        "I" => Some(I), "J" => Some(J), "K" => Some(K), "L" => Some(L),
-        "M" => Some(M), "N" => Some(N), "O" => Some(O), "P" => Some(P),
-        "Q" => Some(Q), "R" => Some(R), "S" => Some(S), "T" => Some(T),
-        "U" => Some(U), "V" => Some(V), "W" => Some(W), "X" => Some(X),
-        "Y" => Some(Y), "Z" => Some(Z),
+        "A" => Some(A),
+        "B" => Some(B),
+        "C" => Some(C),
+        "D" => Some(D),
+        "E" => Some(E),
+        "F" => Some(F),
+        "G" => Some(G),
+        "H" => Some(H),
+        "I" => Some(I),
+        "J" => Some(J),
+        "K" => Some(K),
+        "L" => Some(L),
+        "M" => Some(M),
+        "N" => Some(N),
+        "O" => Some(O),
+        "P" => Some(P),
+        "Q" => Some(Q),
+        "R" => Some(R),
+        "S" => Some(S),
+        "T" => Some(T),
+        "U" => Some(U),
+        "V" => Some(V),
+        "W" => Some(W),
+        "X" => Some(X),
+        "Y" => Some(Y),
+        "Z" => Some(Z),
 
         // --- Number row ---
-        "0" => Some(Alpha0), "1" => Some(Alpha1), "2" => Some(Alpha2), "3" => Some(Alpha3),
-        "4" => Some(Alpha4), "5" => Some(Alpha5), "6" => Some(Alpha6), "7" => Some(Alpha7),
-        "8" => Some(Alpha8), "9" => Some(Alpha9),
+        "0" => Some(Alpha0),
+        "1" => Some(Alpha1),
+        "2" => Some(Alpha2),
+        "3" => Some(Alpha3),
+        "4" => Some(Alpha4),
+        "5" => Some(Alpha5),
+        "6" => Some(Alpha6),
+        "7" => Some(Alpha7),
+        "8" => Some(Alpha8),
+        "9" => Some(Alpha9),
 
         // --- Numpad ---
         "NUMPAD0" | "NUM0" => Some(Keypad0),
@@ -411,4 +511,65 @@ pub fn parse_key_combo(combo: &str) -> Vec<Key> {
         .split('+')
         .filter_map(|part| key_from_name(part.trim()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn empty_config() -> IgniteConfig {
+        IgniteConfig {
+            common: None,
+            input: None,
+            style: None,
+            boss: None,
+            features: None,
+            experimental: None,
+            overlay: None,
+            timer: None,
+        }
+    }
+
+    #[test]
+    fn feature_defaults_keep_display_and_tracking_enabled() {
+        let cfg = empty_config();
+
+        assert!(cfg.overlay_enabled());
+        assert!(cfg.boss_tracking_enabled());
+    }
+
+    #[test]
+    fn feature_defaults_keep_memory_mutation_disabled() {
+        let cfg = empty_config();
+
+        assert!(!cfg.route_actions_enabled());
+        assert!(!cfg.stat_profiles_enabled());
+        assert!(!cfg.auto_grace_enabled());
+        assert!(!cfg.experimental_item_spawn_enabled());
+        assert_eq!(cfg.test_weapon_id(), None);
+    }
+
+    #[test]
+    fn parses_experimental_item_spawn_config() {
+        let cfg: IgniteConfig = toml::from_str(
+            r#"
+            [features]
+            experimental_item_spawn = true
+
+            [experimental]
+            test_weapon_id = 15020810
+            "#,
+        )
+        .unwrap();
+
+        assert!(cfg.experimental_item_spawn_enabled());
+        assert_eq!(cfg.test_weapon_id(), Some(15020810));
+    }
+
+    #[test]
+    fn parses_multi_key_combo() {
+        let keys = parse_key_combo("CTRL+SHIFT+F12");
+
+        assert_eq!(keys, vec![Key::LeftCtrl, Key::LeftShift, Key::F12]);
+    }
 }

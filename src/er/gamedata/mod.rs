@@ -1,5 +1,5 @@
 use crate::debug_log;
-use crate::er::{parse_pattern, scan_pattern, read_i32, read_ptr, get_text_section};
+use crate::er::{get_text_section, parse_pattern, read_i32, read_ptr, scan_pattern};
 
 //
 // ----------------------------------------------------
@@ -69,4 +69,3 @@ pub unsafe fn read_death_count(game_flag_man: *const u8) -> Option<u32> {
     let val = read_i32(game_flag_man.add(GAME_DATA_DEATHS_OFFSET), "Deaths")?;
     Some(val as u32)
 }
-

@@ -8,6 +8,18 @@ macro_rules! debug_log {
             eprint!("{}", msg);
         }
 
+        if let Some(dir) = $crate::util::introspection::get_dll_directory() {
+            let path = dir.join("ignite_overlay.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
+                use std::io::Write;
+                let _ = file.write_all(msg.as_bytes());
+            }
+        }
+
         #[cfg(windows)]
         unsafe {
             use std::ffi::CString;
@@ -22,8 +34,8 @@ macro_rules! debug_log {
 
 pub fn attach_console() {
     unsafe {
-        use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole};
         use std::io::{self, Write};
+        use windows_sys::Win32::System::Console::{AllocConsole, FreeConsole};
 
         FreeConsole();
         if AllocConsole() != 0 {

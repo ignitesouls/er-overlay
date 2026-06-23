@@ -1,0 +1,72 @@
+{
+  "Limgrave": {
+    "vigor": 30,
+    "mind": 10,
+    "endurance": 15,
+    "strength": 10,
+    "dexterity": 10,
+    "intelligence": 10,
+    "faith": 10,
+    "arcane": 10
+  },
+  "Liurnia of the Lakes": {
+    "vigor": 40,
+    "mind": 30,
+    "endurance": 12,
+    "strength": 8,
+    "dexterity": 12,
+    "intelligence": 60,
+    "faith": 10,
+    "arcane": 10
+  },
+  "Caelid": {
+    "vigor": 50,
+    "mind": 10,
+    "endurance": 20,
+    "strength": 50,
+    "dexterity": 18,
+    "intelligence": 1,
+    "faith": 1,
+    "arcane": 50
+  },
+  "Altus Plateau": {
+    "vigor": 50,
+    "mind": 20,
+    "endurance": 20,
+    "strength": 15,
+    "dexterity": 15,
+    "intelligence": 12,
+    "faith": 80,
+    "arcane": 10
+  },
+  "Mt. Gelmir": {
+    "vigor": 50,
+    "mind": 12,
+    "endurance": 20,
+    "strength": 20,
+    "dexterity": 80,
+    "intelligence": 10,
+    "faith": 12,
+    "arcane": 10
+  },
+  "Mountaintops of the Giants": {
+    "vigor": 60,
+    "mind": 12,
+    "endurance": 20,
+    "strength": 80,
+    "dexterity": 20,
+    "intelligence": 10,
+    "faith": 12,
+    "arcane": 10
+  },
+  "ShadowRealm": {
+    "vigor": 60,
+    "mind": 18,
+    "endurance": 25,
+    "strength": 50,
+    "dexterity": 50,
+    "intelligence": 20,
+    "faith": 20,
+    "arcane": 20
+  }
+}

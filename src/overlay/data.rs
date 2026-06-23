@@ -7,6 +7,7 @@ use std::{
 };
 
 use crate::debug_log;
+use crate::er::stats::RegionStatProfile;
 
 #[derive(Default)]
 pub struct AppState {
@@ -167,6 +168,7 @@ pub struct RegionData {
 }
 
 pub type BossRegions = Vec<RegionData>;
+pub type RegionStatProfiles = HashMap<String, RegionStatProfile>;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct RegionSchedule {
@@ -199,6 +201,9 @@ pub struct PhaseActionSet {
 
     #[serde(default)]
     pub set_flags_off: Vec<i32>,
+
+    #[serde(default)]
+    pub spawn_weapons: Vec<i32>,
 }
 
 pub fn load_localized_boss_data(
@@ -207,7 +212,11 @@ pub fn load_localized_boss_data(
     data_file: &str,
 ) -> Option<BossRegions> {
     let lang_norm = language.trim();
-    let lang_norm = if lang_norm.is_empty() { "engus" } else { lang_norm };
+    let lang_norm = if lang_norm.is_empty() {
+        "engus"
+    } else {
+        lang_norm
+    };
 
     let candidates = [
         config_dir.join(format!("data/{}/{}", lang_norm, data_file)),
@@ -287,6 +296,50 @@ pub fn load_region_schedule(config_dir: &PathBuf, schedule_file: &str) -> Option
         Err(e) => {
             debug_log!(
                 "[ignite_overlay] ❌ Could not read schedule '{}': {:?}",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
+}
+
+pub fn load_region_stat_profiles(
+    config_dir: &PathBuf,
+    profile_file: &str,
+) -> Option<RegionStatProfiles> {
+    let path = config_dir.join(format!("data/{}", profile_file));
+
+    if !path.exists() {
+        debug_log!(
+            "[ignite_overlay] Region stat profiles not found at '{}'",
+            path.display()
+        );
+        return None;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<RegionStatProfiles>(&contents) {
+            Ok(data) => {
+                debug_log!(
+                    "[ignite_overlay] Loaded {} region stat profiles from '{}'",
+                    data.len(),
+                    path.display()
+                );
+                Some(data)
+            }
+            Err(e) => {
+                debug_log!(
+                    "[ignite_overlay] Failed to parse stat profiles JSON '{}': {:?}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        },
+        Err(e) => {
+            debug_log!(
+                "[ignite_overlay] Could not read stat profiles '{}': {:?}",
                 path.display(),
                 e
             );

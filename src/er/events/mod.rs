@@ -1,6 +1,6 @@
-use std::{collections::HashMap};
-use fromsoftware_shared::singleton::get_instance;
 use eldenring::cs::{CSEventFlagMan, EventFlag};
+use fromsoftware_shared::singleton::get_instance;
+use std::collections::HashMap;
 
 // Using Vswarte's crate. Traverses the event tree for every flag read (can't cache because struct has private fields)
 #[inline(always)]
@@ -19,9 +19,11 @@ pub fn get_event_flags(flag_ids: &[u32]) -> Option<HashMap<u32, bool>> {
     )
 }
 
-use std::{ptr, slice};
 use crate::debug_log;
-use crate::er::{parse_pattern, scan_pattern, read_u8, read_u64, read_i32, read_ptr, get_text_section};
+use crate::er::{
+    get_text_section, parse_pattern, read_i32, read_ptr, read_u8, read_u64, scan_pattern,
+};
+use std::{ptr, slice};
 
 //
 // ----------------------------------------------------
@@ -58,7 +60,7 @@ pub struct EventFlagGroupNode {
 #[derive(Clone, Copy)]
 pub struct FlagLocation {
     pub base: *const u8,
-    pub bit:  i32,
+    pub bit: i32,
 }
 
 //
@@ -69,11 +71,13 @@ pub struct FlagLocation {
 
 pub unsafe fn find_event_flag_manager_ptr() -> Option<*const *const u8> {
     let (base, size) = get_text_section()?;
-    let pattern = parse_pattern(
-        "48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? 00 00 44 8B E6 85 C0 0F 84 ?? ?? 00 00"
-    );
+    let pattern =
+        parse_pattern("48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? 00 00 44 8B E6 85 C0 0F 84 ?? ?? 00 00");
     let match_addr = scan_pattern(base, size, &pattern)?;
-    debug_log!("[ignite_overlay] Found GLOBAL_CSEventFlagMan pattern at 0x{:x}", match_addr as usize);
+    debug_log!(
+        "[ignite_overlay] Found GLOBAL_CSEventFlagMan pattern at 0x{:x}",
+        match_addr as usize
+    );
 
     // Show hex dump for clarity
     let dump = slice::from_raw_parts(match_addr, 32);
@@ -81,7 +85,10 @@ pub unsafe fn find_event_flag_manager_ptr() -> Option<*const *const u8> {
     for (i, b) in dump.iter().enumerate() {
         use std::fmt::Write;
         let _ = write!(&mut line, "{:02X} ", b);
-        if (i + 1) % 16 == 0 { debug_log!("[ignite_overlay]    {}", line); line.clear(); }
+        if (i + 1) % 16 == 0 {
+            debug_log!("[ignite_overlay]    {}", line);
+            line.clear();
+        }
     }
 
     // Displacement at +3 (RIP-relative LEA)
@@ -89,7 +96,10 @@ pub unsafe fn find_event_flag_manager_ptr() -> Option<*const *const u8> {
     let rip_next = match_addr.add(8);
     let ptr_addr = rip_next.offset(disp as isize);
 
-    debug_log!("[ignite_overlay] ➜ computed GLOBAL_CSEventFlagMan @ 0x{:x}", ptr_addr as usize);
+    debug_log!(
+        "[ignite_overlay] ➜ computed GLOBAL_CSEventFlagMan @ 0x{:x}",
+        ptr_addr as usize
+    );
 
     // Ensure 8-byte alignment
     Some(if (ptr_addr as usize) % 8 == 0 {
@@ -104,11 +114,15 @@ pub unsafe fn find_event_flag_manager_ptr() -> Option<*const *const u8> {
 pub unsafe fn try_resolve_eventflagman() -> Option<*const u8> {
     let man_ptr = find_event_flag_manager_ptr()?;
     let man = read_ptr(man_ptr as *const u8, "EventFlagMan**")?;
-    if man.is_null() { return None; }
+    if man.is_null() {
+        return None;
+    }
 
     let divisor = read_i32(man.add(EVENT_FLAG_DIVISOR), "divisor")?;
-    let entry   = read_i32(man.add(FLAG_HOLDER_ENTRY_SIZE), "entry_size")?;
-    if divisor <= 0 || entry <= 0 { return None; }
+    let entry = read_i32(man.add(FLAG_HOLDER_ENTRY_SIZE), "entry_size")?;
+    if divisor <= 0 || entry <= 0 {
+        return None;
+    }
 
     Some(man)
 }
@@ -121,13 +135,20 @@ pub unsafe fn try_resolve_eventflagman() -> Option<*const u8> {
 
 #[inline(always)]
 pub unsafe fn read_root(evt_flag_man: *const u8) -> *const u8 {
-    read_ptr(evt_flag_man.add(FLAG_GROUP_ROOT_NODE), "FLAG_GROUP_ROOT_NODE").unwrap_or(ptr::null())
+    read_ptr(
+        evt_flag_man.add(FLAG_GROUP_ROOT_NODE),
+        "FLAG_GROUP_ROOT_NODE",
+    )
+    .unwrap_or(ptr::null())
 }
 
 #[inline(always)]
 pub unsafe fn read_entry_size(evt_flag_man: *const u8) -> usize {
-    read_i32(evt_flag_man.add(FLAG_HOLDER_ENTRY_SIZE), "FLAG_HOLDER_ENTRY_SIZE")
-        .unwrap_or_default() as usize
+    read_i32(
+        evt_flag_man.add(FLAG_HOLDER_ENTRY_SIZE),
+        "FLAG_HOLDER_ENTRY_SIZE",
+    )
+    .unwrap_or_default() as usize
 }
 
 //
@@ -222,7 +243,10 @@ pub unsafe fn get_event_flag_loc_and_bit(
 }
 
 /// Builds a cache of flag_id → (holder base, bit offset)
-pub unsafe fn build_cache(evt_flag_man: *const u8, flag_ids: &Vec<i32>) -> HashMap<i32, FlagLocation> {
+pub unsafe fn build_cache(
+    evt_flag_man: *const u8,
+    flag_ids: &Vec<i32>,
+) -> HashMap<i32, FlagLocation> {
     let mut cache = HashMap::with_capacity(flag_ids.len());
     for &id in flag_ids {
         if let Some((base, bit)) = get_event_flag_loc_and_bit(evt_flag_man, id) {
@@ -237,8 +261,7 @@ pub unsafe fn read_from_flag_location(loc: &FlagLocation) -> bool {
     let byte_ix = (loc.bit / 8) as usize;
     let bit_mask = 1u8 << (7 - (loc.bit % 8));
 
-    let byte_val = read_u8(loc.base.add(byte_ix), "flag_byte")
-        .unwrap_or_default();
+    let byte_val = read_u8(loc.base.add(byte_ix), "flag_byte").unwrap_or_default();
 
     (byte_val & bit_mask) != 0
 }

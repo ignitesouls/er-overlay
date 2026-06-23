@@ -2,10 +2,9 @@ pub mod er;
 pub mod overlay;
 pub mod util;
 
-use std::thread;
+use hudhook::{Hudhook, eject, hooks::dx12::ImguiDx12Hooks, tracing::error};
 use overlay::ui::EROverlayUi;
-use hudhook::{tracing::error, eject, Hudhook, hooks::dx12::ImguiDx12Hooks};
-
+use std::thread;
 
 #[unsafe(no_mangle)]
 #[allow(non_snake_case)]
@@ -15,13 +14,13 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
     if reason == DLL_PROCESS_ATTACH {
         let _ = thread::spawn(|| {
             if let Err(e) = Hudhook::builder()
-            .with::<ImguiDx12Hooks>(EROverlayUi::new())
-            .build()
-            .apply()
-        {
-            error!("Couldn't apply hooks: {e:?}");
-            eject();
-        }
+                .with::<ImguiDx12Hooks>(EROverlayUi::new())
+                .build()
+                .apply()
+            {
+                error!("Couldn't apply hooks: {e:?}");
+                eject();
+            }
         });
     }
     true

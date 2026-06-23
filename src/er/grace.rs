@@ -9,10 +9,7 @@ use eldenring::position::BlockPosition;
 use fromsoftware_shared::singleton::get_instance;
 use serde::Deserialize;
 
-use crate::{
-    debug_log,
-    util::introspection::get_dll_directory,
-};
+use crate::{debug_log, util::introspection::get_dll_directory};
 
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub struct JsonMapId {

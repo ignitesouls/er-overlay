@@ -1,33 +1,30 @@
 use std::{
     collections::HashMap,
     fmt::Write,
-    sync::{
-        atomic::AtomicBool,
-        Arc, RwLock,
-    },
+    sync::{Arc, RwLock, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
-use hudhook::ImguiRenderLoop;
+use hudhook::{ImguiRenderLoop, eject};
 use imgui::{Key, Ui};
 
 use crate::{
     debug_log,
-    er::grace::try_auto_activate_nearby_grace,
+    er::{grace::try_auto_activate_nearby_grace, item_spawn::start_test_weapon_grant},
     overlay::{
         core::start_game_monitor,
         data::{
-            create_state, load_localized_boss_data, load_region_schedule, load_run_state, AppState,
-            BossRegions, RegionSchedule,
+            AppState, BossRegions, PersistedRunState, RegionSchedule, RegionStatProfiles,
+            SchedulePhase, create_state, load_localized_boss_data, load_region_schedule,
+            load_region_stat_profiles, load_run_state, save_run_state,
         },
         style::{
-            apply_common_config, apply_style_config, parse_key_combo, read_config, IgniteConfig,
-            TimerMode, DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS,
+            DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config,
+            apply_style_config, parse_key_combo, read_config,
         },
     },
     util::{
-        debug::attach_console,
-        introspection::get_dll_directory,
+        debug::attach_console, introspection::get_dll_directory,
         text_formatter::format_display_text,
     },
 };
@@ -35,6 +32,8 @@ use crate::{
 pub struct EROverlayUi {
     last_click_time: Instant,
     last_toggle_time: Instant,
+    last_unload_time: Instant,
+    last_reset_time: Instant,
     timer_buf: String,
     full_mode: bool,
 
@@ -42,12 +41,15 @@ pub struct EROverlayUi {
     config_error: Option<String>,
 
     toggle_full_mode_keys: Option<Vec<Key>>,
+    unload_keys: Option<Vec<Key>>,
     click_action_keys: Option<Vec<imgui::Key>>,
+    reset_run_keys: Option<Vec<Key>>,
 
     state: Arc<RwLock<AppState>>,
     igt: Arc<RwLock<u32>>,
     boss_regions: Option<BossRegions>,
     region_schedule: Option<RegionSchedule>,
+    stat_profiles: Option<RegionStatProfiles>,
 
     timer_mode: TimerMode,
     prep_time_ms: u32,
@@ -72,11 +74,23 @@ impl EROverlayUi {
             .and_then(|i| i.toggle_full_mode.clone())
             .map(|combo| parse_key_combo(&combo));
 
+        let unload_keys = config
+            .as_ref()
+            .and_then(|c| c.input.as_ref())
+            .and_then(|i| i.unload.clone())
+            .map(|combo| parse_key_combo(&combo));
+
         let click_action_keys = config
             .as_ref()
             .and_then(|c| c.input.as_ref())
             .and_then(|i| i.click_action.clone())
             .map(|s| parse_key_combo(&s));
+
+        let reset_run_keys = config
+            .as_ref()
+            .and_then(|c| c.input.as_ref())
+            .and_then(|i| i.reset_run.clone())
+            .map(|combo| parse_key_combo(&combo));
 
         let language = config
             .as_ref()
@@ -102,6 +116,14 @@ impl EROverlayUi {
             .filter(|s| !s.is_empty())
             .unwrap_or("region_schedule.json");
 
+        let profile_file = config
+            .as_ref()
+            .and_then(|c| c.boss.as_ref())
+            .and_then(|cc| cc.profile_file.as_ref())
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("region_profiles.json");
+
         let seed_id = config
             .as_ref()
             .and_then(|c| c.boss.as_ref())
@@ -119,6 +141,10 @@ impl EROverlayUi {
         let region_schedule = dll_dir
             .as_ref()
             .and_then(|dir| load_region_schedule(dir, schedule_file));
+
+        let stat_profiles = dll_dir
+            .as_ref()
+            .and_then(|dir| load_region_stat_profiles(dir, profile_file));
 
         let timer_mode = config
             .as_ref()
@@ -143,16 +169,21 @@ impl EROverlayUi {
         Self {
             last_click_time: Instant::now(),
             last_toggle_time: Instant::now(),
+            last_unload_time: Instant::now(),
+            last_reset_time: Instant::now(),
             timer_buf: String::with_capacity(32),
             full_mode: false,
             config,
             config_error,
             toggle_full_mode_keys,
+            unload_keys,
             click_action_keys,
+            reset_run_keys,
             state: create_state(),
             igt: Arc::new(RwLock::new(0)),
             boss_regions,
             region_schedule,
+            stat_profiles,
             timer_mode,
             prep_time_ms,
             timer_target_ms,
@@ -218,6 +249,39 @@ impl EROverlayUi {
         (total_killed, total_possible)
     }
 
+    fn route_total_duration_seconds(&self) -> u32 {
+        self.region_schedule
+            .as_ref()
+            .map(|schedule| {
+                schedule
+                    .phases
+                    .iter()
+                    .map(|phase| phase.duration_minutes.saturating_mul(60) as u32)
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    fn route_is_complete(&self) -> bool {
+        let total_seconds = self.route_total_duration_seconds();
+        if total_seconds == 0 {
+            return false;
+        }
+
+        self.igt
+            .read()
+            .map(|seconds| *seconds >= total_seconds)
+            .unwrap_or(false)
+    }
+
+    fn route_status_text(&self) -> String {
+        if self.route_is_complete() {
+            "RUN COMPLETE".to_string()
+        } else {
+            "Running".to_string()
+        }
+    }
+
     fn build_current_region_totals(&self, current_region: &str) -> (usize, usize) {
         if current_region.is_empty() {
             return (0, 0);
@@ -248,6 +312,124 @@ impl EROverlayUi {
         }
     }
 
+    fn boss_totals_for_region(
+        &self,
+        region_name: &str,
+        counted_flags: &std::collections::HashSet<i32>,
+    ) -> (usize, usize) {
+        let Some(all_regions) = self.boss_regions.as_ref() else {
+            return (0, 0);
+        };
+
+        all_regions
+            .iter()
+            .find(|r| r.region_name.eq_ignore_ascii_case(region_name))
+            .map(|region| {
+                let total = region.bosses.len();
+                let defeated = region
+                    .bosses
+                    .iter()
+                    .filter(|boss| counted_flags.contains(&boss.flag_id))
+                    .count();
+                (defeated, total)
+            })
+            .unwrap_or((0, 0))
+    }
+
+    fn render_route_overview(&self, ui: &Ui) {
+        let Some(schedule) = self.region_schedule.as_ref() else {
+            ui.text("Route: no region schedule loaded");
+            return;
+        };
+
+        let Ok(state) = self.state.read() else {
+            ui.text("Route: waiting for state");
+            return;
+        };
+
+        let active_phase = state.active_phase_index;
+        let counted_flags = state.counted_flags.clone();
+        let total_duration = self.route_total_duration_seconds();
+        let current_igt = self.igt.read().map(|seconds| *seconds).unwrap_or(0);
+        let route_complete = total_duration > 0 && current_igt >= total_duration;
+        let (route_kills, route_total) = self.build_route_totals();
+
+        ui.separator();
+        ui.text_colored(
+            [0.70, 0.88, 1.00, 1.0],
+            format!("Route  {}", schedule.schedule_name),
+        );
+        ui.text_colored(
+            if route_complete {
+                [0.45, 1.00, 0.65, 1.0]
+            } else {
+                [1.00, 0.78, 0.42, 1.0]
+            },
+            if route_complete {
+                format!("RUN COMPLETE  Final Points {}/{}", route_kills, route_total)
+            } else {
+                format!("Running  Total Points {}/{}", route_kills, route_total)
+            },
+        );
+        ui.separator();
+
+        let mut start_seconds = 0u32;
+        for (idx, phase) in schedule.phases.iter().enumerate() {
+            let duration_seconds = phase.duration_minutes.saturating_mul(60) as u32;
+            let end_seconds = start_seconds.saturating_add(duration_seconds);
+            let (defeated, total) = self.boss_totals_for_region(&phase.region_name, &counted_flags);
+
+            let status = if Some(idx) == active_phase {
+                "CURRENT"
+            } else if route_complete || Some(idx) < active_phase {
+                "DONE"
+            } else {
+                "NEXT"
+            };
+
+            let status_color = match status {
+                "CURRENT" => [1.00, 0.78, 0.42, 1.0],
+                "DONE" => [0.45, 1.00, 0.65, 1.0],
+                _ => [0.70, 0.76, 0.82, 1.0],
+            };
+
+            ui.text_colored(status_color, format!("{:>7}", status));
+            ui.same_line();
+            ui.text(format!(
+                " {:02}:{:02}-{:02}:{:02}  {}",
+                start_seconds / 60,
+                start_seconds % 60,
+                end_seconds / 60,
+                end_seconds % 60,
+                phase.region_name
+            ));
+            ui.text_colored(
+                [0.80, 0.84, 0.88, 1.0],
+                format!("        {}  Points {}/{}", phase.name, defeated, total),
+            );
+
+            start_seconds = end_seconds;
+        }
+
+        ui.separator();
+    }
+
+    fn fallback_region_schedule() -> RegionSchedule {
+        RegionSchedule {
+            schedule_name: "fallback".to_string(),
+            count_mode: "strict".to_string(),
+            time_basis: "igt".to_string(),
+            phases: vec![SchedulePhase {
+                name: "Fallback".to_string(),
+                region_name: "Unscheduled".to_string(),
+                duration_minutes: 1_000_000,
+                on_enter_once: None,
+                while_active: None,
+                on_exit: None,
+            }],
+        }
+    }
+
     fn render_closed(&mut self, ui: &Ui) {
         self.write_igt();
 
@@ -275,6 +457,7 @@ impl EROverlayUi {
         let (defeated, total) = self.build_current_region_totals(&region_name);
         let route_regions = self.build_route_string(&region_name);
         let (route_kills, route_total) = self.build_route_totals();
+        let route_status = self.route_status_text();
 
         let vars = {
             let igt_str = self.timer_buf.clone();
@@ -293,6 +476,9 @@ impl EROverlayUi {
                 ("route_names", route_regions),
                 ("route_total", route_total.to_string()),
                 ("route_kills", route_kills.to_string()),
+                ("total_points", route_kills.to_string()),
+                ("point_total", route_total.to_string()),
+                ("route_status", route_status),
             ])
         };
 
@@ -345,6 +531,7 @@ impl EROverlayUi {
         let (defeated, total) = self.build_current_region_totals(&region_name);
         let route_regions = self.build_route_string(&region_name);
         let (route_kills, route_total) = self.build_route_totals();
+        let route_status = self.route_status_text();
 
         let vars = {
             let igt_str = self.timer_buf.clone();
@@ -363,6 +550,9 @@ impl EROverlayUi {
                 ("route_names", route_regions),
                 ("route_total", route_total.to_string()),
                 ("route_kills", route_kills.to_string()),
+                ("total_points", route_kills.to_string()),
+                ("point_total", route_total.to_string()),
+                ("route_status", route_status),
             ])
         };
 
@@ -388,6 +578,8 @@ impl EROverlayUi {
             }
         }
 
+        self.render_route_overview(ui);
+
         let avail = ui.content_region_avail();
         let child = ui
             .child_window("BossListRegion")
@@ -400,8 +592,16 @@ impl EROverlayUi {
                 if let Ok(state) = self.state.read() {
                     let flags = &state.event_flags;
                     let active_region = state.active_region_name.clone();
+                    let route_regions = self.route_region_names_in_order();
 
-                    for region in data {
+                    for region_name in route_regions {
+                        let Some(region) = data
+                            .iter()
+                            .find(|r| r.region_name.eq_ignore_ascii_case(&region_name))
+                        else {
+                            continue;
+                        };
+
                         let defeated = region
                             .bosses
                             .iter()
@@ -410,9 +610,9 @@ impl EROverlayUi {
                         let total = region.bosses.len();
 
                         let label = if region.region_name == active_region {
-                            format!("▶ {} ({}/{})", region.region_name, defeated, total)
+                            format!("CURRENT  {}  {}/{}", region.region_name, defeated, total)
                         } else {
-                            format!("{} ({}/{})", region.region_name, defeated, total)
+                            format!("{}  {}/{}", region.region_name, defeated, total)
                         };
 
                         if let Some(_t) = ui
@@ -472,6 +672,7 @@ impl EROverlayUi {
         let (defeated, total) = self.build_current_region_totals(&region_name);
         let route_regions = self.build_route_string(&region_name);
         let (route_kills, route_total) = self.build_route_totals();
+        let route_status = self.route_status_text();
 
         let vars = HashMap::from([
             ("kills", defeated.to_string()),
@@ -488,6 +689,9 @@ impl EROverlayUi {
             ("route_names", route_regions),
             ("route_total", route_total.to_string()),
             ("route_kills", route_kills.to_string()),
+            ("total_points", route_kills.to_string()),
+            ("point_total", route_total.to_string()),
+            ("route_status", route_status),
         ]);
 
         let template = self
@@ -571,11 +775,7 @@ impl EROverlayUi {
                         hours, minutes, seconds
                     );
                 } else {
-                    let _ = write!(
-                        self.timer_buf,
-                        "{:02}:{:02}:{:02}",
-                        hours, minutes, seconds
-                    );
+                    let _ = write!(self.timer_buf, "{:02}:{:02}:{:02}", hours, minutes, seconds);
                 }
             }
         }
@@ -617,6 +817,39 @@ impl EROverlayUi {
         debug_log!("[ignite_overlay] Simulated mouse click");
     }
 
+    fn reset_run_progress(&mut self) {
+        if let Ok(mut state) = self.state.write() {
+            state.counted_flags.clear();
+            state.cumulative_counted_kills = 0;
+            state.counted_kills = 0;
+            state.boss_first_kill_time.clear();
+        }
+
+        if let Some(dir) = self.dll_dir.as_ref() {
+            let cleared = PersistedRunState {
+                seed: self.seed_id.clone(),
+                counted_flags: Default::default(),
+                cumulative_counted_kills: 0,
+            };
+            let _ = save_run_state(dir, &cleared);
+        }
+
+        debug_log!(
+            "[ignite_overlay] Run progress reset for seed '{}'",
+            self.seed_id
+        );
+    }
+
+    fn combo_down(io: &imgui::Io, keys: &[Key]) -> bool {
+        !keys.is_empty() && keys.iter().all(|&k| io.keys_down[k as usize])
+    }
+
+    fn combo_pressed(ui: &imgui::Ui, keys: &[Key]) -> bool {
+        !keys.is_empty()
+            && keys.iter().all(|&k| ui.io().keys_down[k as usize])
+            && keys.iter().any(|&k| ui.is_key_pressed(k))
+    }
+
     fn is_click_in_header(ui: &imgui::Ui, header_height: f32) -> bool {
         let io = ui.io();
         if !io.mouse_down[0] {
@@ -642,17 +875,38 @@ impl ImguiRenderLoop for EROverlayUi {
         if let Some(cfg) = &self.config {
             apply_style_config(imgui, cfg);
             apply_common_config(imgui, cfg, ctx);
+
+            if cfg.experimental_item_spawn_enabled() {
+                if let Some(weapon_id) = cfg.test_weapon_id() {
+                    start_test_weapon_grant(weapon_id);
+                } else {
+                    debug_log!(
+                        "[ignite_overlay] Experimental item spawn enabled, but no test_weapon_id configured"
+                    );
+                }
+            }
         }
 
-        let Some(boss_regions) = self.boss_regions.clone() else {
-            debug_log!("[ignite_overlay] No boss regions loaded; monitor not started.");
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|cfg| !cfg.boss_tracking_enabled())
+        {
+            debug_log!("[ignite_overlay] Boss tracking disabled by config; monitor not started.");
             return;
-        };
+        }
 
-        let Some(region_schedule) = self.region_schedule.clone() else {
-            debug_log!("[ignite_overlay] No region schedule loaded; monitor not started.");
-            return;
-        };
+        let boss_regions = self.boss_regions.clone().unwrap_or_else(|| {
+            debug_log!("[ignite_overlay] No boss regions loaded; starting timer-only monitor.");
+            Vec::new()
+        });
+
+        let region_schedule = self.region_schedule.clone().unwrap_or_else(|| {
+            debug_log!(
+                "[ignite_overlay] No region schedule loaded; using fallback timer-only schedule."
+            );
+            Self::fallback_region_schedule()
+        });
 
         if let Some(dir) = self.dll_dir.as_ref() {
             if let Some(saved) = load_run_state(dir, &self.seed_id) {
@@ -682,6 +936,16 @@ impl ImguiRenderLoop for EROverlayUi {
             self.igt.clone(),
             boss_regions,
             region_schedule,
+            self.stat_profiles.clone(),
+            self.config
+                .as_ref()
+                .is_some_and(|cfg| cfg.route_actions_enabled()),
+            self.config
+                .as_ref()
+                .is_some_and(|cfg| cfg.stat_profiles_enabled()),
+            self.config
+                .as_ref()
+                .is_some_and(|cfg| cfg.experimental_item_spawn_enabled()),
             key_item_id,
             100,
             self.monitor_stop.clone(),
@@ -692,20 +956,41 @@ impl ImguiRenderLoop for EROverlayUi {
         debug_log!("[ignite_overlay] Game monitor started successfully.");
     }
 
-    fn before_render(
-        &mut self,
-        imgui: &mut imgui::Context,
-        _ctx: &mut dyn hudhook::RenderContext,
-    ) {
-        try_auto_activate_nearby_grace();
-
+    fn before_render(&mut self, imgui: &mut imgui::Context, _ctx: &mut dyn hudhook::RenderContext) {
         let io = imgui.io();
         let now = std::time::Instant::now();
 
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|cfg| cfg.auto_grace_enabled())
+        {
+            try_auto_activate_nearby_grace();
+        }
+
+        if let Some(keys) = &self.unload_keys {
+            if Self::combo_down(io, keys)
+                && now.duration_since(self.last_unload_time) > std::time::Duration::from_millis(500)
+            {
+                self.last_unload_time = now;
+                debug_log!("[ignite_overlay] Unload shortcut pressed; ejecting overlay");
+                eject();
+            }
+        }
+
+        let should_reset = self.reset_run_keys.as_ref().is_some_and(|keys| {
+            Self::combo_down(io, keys)
+                && now.duration_since(self.last_reset_time) > std::time::Duration::from_millis(500)
+        });
+
+        if should_reset {
+            self.last_reset_time = now;
+            self.reset_run_progress();
+        }
+
         if let Some(keys) = &self.click_action_keys {
-            if keys.iter().all(|&k| io.keys_down[k as usize]) {
-                if now.duration_since(self.last_click_time)
-                    > std::time::Duration::from_millis(200)
+            if Self::combo_down(io, keys) {
+                if now.duration_since(self.last_click_time) > std::time::Duration::from_millis(200)
                 {
                     Self::simulate_mouse_click(imgui);
                     self.last_click_time = now;
@@ -715,8 +1000,16 @@ impl ImguiRenderLoop for EROverlayUi {
     }
 
     fn render(&mut self, ui: &mut imgui::Ui) {
+        if self
+            .config
+            .as_ref()
+            .is_some_and(|cfg| !cfg.overlay_enabled())
+        {
+            return;
+        }
+
         if let Some(keys) = self.toggle_full_mode_keys.as_ref() {
-            if keys.iter().all(|&k| ui.is_key_pressed(k)) {
+            if Self::combo_pressed(ui, keys) {
                 self.full_mode = !self.full_mode;
                 debug_log!("[ignite_overlay] full_mode toggled -> {}", self.full_mode);
             }
@@ -737,8 +1030,16 @@ impl ImguiRenderLoop for EROverlayUi {
             let w = screen_w * w_ratio;
             let h = screen_h * h_ratio;
 
-            let x = if x_off < 0.0 { screen_w - w + x_off } else { x_off };
-            let y = if y_off < 0.0 { screen_h - h + y_off } else { y_off };
+            let x = if x_off < 0.0 {
+                screen_w - w + x_off
+            } else {
+                x_off
+            };
+            let y = if y_off < 0.0 {
+                screen_h - h + y_off
+            } else {
+                y_off
+            };
             (w, h, x, y)
         };
 
@@ -753,8 +1054,7 @@ impl ImguiRenderLoop for EROverlayUi {
                 )
                 .build(|| {
                     if let Some(err) = &self.config_error {
-                        let _c =
-                            ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
+                        let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
                         ui.text("⚠ Failed to load config:");
                         ui.text_wrapped(err);
                         return;
@@ -792,8 +1092,7 @@ impl ImguiRenderLoop for EROverlayUi {
                 )
                 .build(|| {
                     if let Some(err) = &self.config_error {
-                        let _c =
-                            ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
+                        let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
                         ui.text("⚠ Failed to load config:");
                         ui.text_wrapped(err);
                         return;

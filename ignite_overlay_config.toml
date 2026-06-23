@@ -7,7 +7,7 @@ console=false
 font=""
 
 # font size
-font_size=42
+font_size=28
 
 # accpeted charsets:
 #  enUS, frFR, deDE, esES, esAR, itIT, ptBr -> Latin
@@ -72,48 +72,74 @@ language=""
 toggle_full_mode="="
 # shortcut key to trigger a mouse click
 click_action="-"
+# shortcut key to reset saved route points for the current seed
+reset_run="CTRL+SHIFT+R"
+# shortcut key to unload the overlay
+unload="CTRL+SHIFT+F12"
+
+[features]
+# Display the overlay window.
+overlay=true
+# Start the game monitor that reads boss, rune, shard, death, and timer state.
+boss_tracking=true
+# Allow route phase actions to write event flags.
+route_actions=true
+# Allow region changes to write player stat profiles from data/region_profiles.json.
+stat_profiles=true
+# Allow automatic nearby grace discovery from graces.json.
+auto_grace=false
+# Experimental reverse-engineered item grant. Keep disabled unless actively testing.
+experimental_item_spawn=true
+
+[experimental]
+# Optional one-shot weapon grant on DLL load.
+# Leave unset when using region_schedule.json spawn_weapons.
 
 [style]
 # text color (Red,Green,Blue,Alpha)
-text_color=[255,255,255,250]
+text_color=[235,239,244,250]
 # check mark color (Red,Green,Blue,Alpha)
-check_mark_color=[138,43,226,230]
+check_mark_color=[245,190,92,240]
 # background color (Red,Green,Blue,Alpha)
-bg_color=[18,18,30,220]
+bg_color=[12,16,20,228]
 # border color (Red,Green,Blue,Alpha)
-border_color=[180,0,255,180]
+border_color=[92,112,128,150]
 # button color (Red,Green,Blue,Alpha)
-button_color=[30,0,60,150]
+button_color=[34,44,54,180]
 # button hover color (Red,Green,Blue,Alpha)
-button_hover_color=[50,50,120,170]
+button_hover_color=[52,70,84,205]
 # button press color (Red,Green,Blue,Alpha)
-button_press_color=[70,20,120,230]
+button_press_color=[74,92,106,230]
 # node color (Red,Green,Blue,Alpha)
-node_color=[15,15,30,160]
+node_color=[24,32,40,180]
 # node hover color (Red,Green,Blue,Alpha)
-node_hover_color=[45,45,90,160]
+node_hover_color=[42,54,64,210]
 # node press color (Red,Green,Blue,Alpha)
-node_press_color=[65,25,100,180]
+node_press_color=[58,72,82,230]
 # scroll bar background color (Red,Green,Blue,Alpha)
-scroll_bg_color=[20,20,40,160]
+scroll_bg_color=[12,16,20,140]
 # scroll bar color (Red,Green,Blue,Alpha)
-scroll_color=[80,80,160,160]
+scroll_color=[78,92,104,170]
 # scroll bar hover color (Red,Green,Blue,Alpha)
-scroll_hover_color=[100,100,200,180]
+scroll_hover_color=[116,134,148,210]
 # scroll bar press color (Red,Green,Blue,Alpha)
-scroll_press_color=[140,100,220,200]
+scroll_press_color=[245,190,92,225]
 # border width
 border_width=1
 # window rounding radius
-rounding=7
+rounding=8
 # panel position (x, y) in units of pixels
 panel_pos=[-10,10]
 # panel dimension (width, height) in units of fraction of screen width/height
-panel_dim=[0.20, 0.92]
+panel_dim=[0.30, 0.92]
 
 [boss]
 # data filename for boss list, which is located in `data/<language>` folder
 data_file="bosses.json"
+# schedule filename, located in `data` folder
+schedule_file="region_schedule.json"
+# region stat profile filename, located in `data` folder
+profile_file="region_profiles.json"
 
 [overlay]
 # how to display the text on the overlay
@@ -125,4 +151,4 @@ data_file="bosses.json"
 #  {igt}   = In-game time
 #  {shards}= Number of messmer's kindling shards acquired
 #  {runes} = Number of great runes acquired
-display_text = "IGT: {igt}$nBosses: {kills}/{total}$nGreat Runes: {runes}$nShards: {shards}$nDeaths: {deaths}"
+display_text = "IGT: {igt}$nStatus: {route_status}$nRegion: {region}$nPhase: {phase}$nPoints: {total_points}/{point_total}$nRegion Bosses: {kills}/{total}$nRunes: {runes}  Shards: {shards}  Deaths: {deaths}"

@@ -1,17 +1,18 @@
 #![allow(unsafe_op_in_unsafe_fn)]
 
-pub mod inventory;
 pub mod events;
 pub mod gamedata;
 pub mod grace;
+pub mod inventory;
+pub mod item_spawn;
 pub mod stats;
 
+use crate::debug_log;
 use std::{mem, ptr, slice};
 use winapi::um::winnt::IMAGE_NT_HEADERS64;
 use windows_sys::Win32::System::Diagnostics::Debug::IMAGE_SECTION_HEADER;
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleA;
 use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
-use crate::debug_log;
 
 //
 // ----------------------------------------------------
@@ -41,10 +42,22 @@ pub unsafe fn read_typed<T: Copy + Default>(addr: *const u8, label: &str) -> Opt
     Some(ptr::read_unaligned(addr as *const T))
 }
 
-#[inline(always)] pub unsafe fn read_u8(addr: *const u8, label: &str) -> Option<u8> { read_typed(addr, label) }
-#[inline(always)] pub unsafe fn read_i32(addr: *const u8, label: &str) -> Option<i32> { read_typed(addr, label) }
-#[inline(always)] pub unsafe fn read_u64(addr: *const u8, label: &str) -> Option<u64> { read_typed(addr, label) }
-#[inline(always)] pub unsafe fn read_ptr(addr: *const u8, label: &str) -> Option<*const u8> { read_typed(addr, label) }
+#[inline(always)]
+pub unsafe fn read_u8(addr: *const u8, label: &str) -> Option<u8> {
+    read_typed(addr, label)
+}
+#[inline(always)]
+pub unsafe fn read_i32(addr: *const u8, label: &str) -> Option<i32> {
+    read_typed(addr, label)
+}
+#[inline(always)]
+pub unsafe fn read_u64(addr: *const u8, label: &str) -> Option<u64> {
+    read_typed(addr, label)
+}
+#[inline(always)]
+pub unsafe fn read_ptr(addr: *const u8, label: &str) -> Option<*const u8> {
+    read_typed(addr, label)
+}
 
 //
 // ----------------------------------------------------
@@ -53,39 +66,48 @@ pub unsafe fn read_typed<T: Copy + Default>(addr: *const u8, label: &str) -> Opt
 //
 
 #[derive(Clone, Copy)]
-enum PatternByte { Exact(u8), Wildcard }
+enum PatternByte {
+    Exact(u8),
+    Wildcard,
+}
 
 fn parse_pattern(pat: &str) -> Vec<PatternByte> {
     pat.split_whitespace()
-        .map(|b| if b == "??" || b == "?" {
-            PatternByte::Wildcard
-        } else {
-            PatternByte::Exact(u8::from_str_radix(b, 16).unwrap())
+        .map(|b| {
+            if b == "??" || b == "?" {
+                PatternByte::Wildcard
+            } else {
+                PatternByte::Exact(u8::from_str_radix(b, 16).unwrap())
+            }
         })
         .collect()
 }
 
 unsafe fn get_text_section() -> Option<(*const u8, usize)> {
     let hmod = GetModuleHandleA(ptr::null());
-    if hmod.is_null() { return None; }
+    if hmod.is_null() {
+        return None;
+    }
 
     let base = hmod as *const u8;
     let dos = &*(base as *const IMAGE_DOS_HEADER);
     let nt = &*((base.add(dos.e_lfanew as usize)) as *const IMAGE_NT_HEADERS64);
 
-    let sections = (nt as *const _ as *const u8)
-        .add(mem::size_of::<IMAGE_NT_HEADERS64>()) as *const IMAGE_SECTION_HEADER;
+    let sections = (nt as *const _ as *const u8).add(mem::size_of::<IMAGE_NT_HEADERS64>())
+        as *const IMAGE_SECTION_HEADER;
 
     let num_sections = (*nt).FileHeader.NumberOfSections as usize;
-    (0..num_sections)
-        .find_map(|i| {
-            let sect = &*sections.add(i);
-            if &sect.Name[..5] == b".text" {
-                Some((base.add(sect.VirtualAddress as usize), sect.Misc.VirtualSize as usize))
-            } else {
-                None
-            }
-        })
+    (0..num_sections).find_map(|i| {
+        let sect = &*sections.add(i);
+        if &sect.Name[..5] == b".text" {
+            Some((
+                base.add(sect.VirtualAddress as usize),
+                sect.Misc.VirtualSize as usize,
+            ))
+        } else {
+            None
+        }
+    })
 }
 
 unsafe fn scan_pattern(base: *const u8, size: usize, pattern: &[PatternByte]) -> Option<*const u8> {
@@ -95,7 +117,9 @@ unsafe fn scan_pattern(base: *const u8, size: usize, pattern: &[PatternByte]) ->
     'outer: for i in 0..=size - pat_len {
         for j in 0..pat_len {
             if let PatternByte::Exact(b) = pattern[j] {
-                if bytes[i + j] != b { continue 'outer; }
+                if bytes[i + j] != b {
+                    continue 'outer;
+                }
             }
         }
         return Some(base.add(i));

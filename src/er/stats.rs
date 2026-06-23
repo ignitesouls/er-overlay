@@ -1,9 +1,10 @@
 use eldenring::cs::WorldChrMan;
 use fromsoftware_shared::singleton::get_instance;
+use serde::Deserialize;
 
 use crate::debug_log;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 pub struct RegionStatProfile {
     pub vigor: u32,
     pub mind: u32,

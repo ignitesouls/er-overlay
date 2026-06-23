@@ -40,3 +40,30 @@ pub fn format_display_text(template: &str, vars: &HashMap<&str, String>) -> Vec<
 
     lines
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expands_variables_and_newlines() {
+        let vars = HashMap::from([
+            ("igt", "01:02:03".to_string()),
+            ("kills", "3".to_string()),
+            ("total", "5".to_string()),
+        ]);
+
+        let lines = format_display_text("IGT: {igt}$nBosses: {kills}/{total}", &vars);
+
+        assert_eq!(lines, vec![" IGT: 01:02:03 ", " Bosses: 3/5 "]);
+    }
+
+    #[test]
+    fn preserves_unknown_placeholders() {
+        let vars = HashMap::new();
+
+        let lines = format_display_text("Region: {region}", &vars);
+
+        assert_eq!(lines, vec![" Region: {region} "]);
+    }
+}

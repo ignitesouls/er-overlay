@@ -1,7 +1,7 @@
 use std::{
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, RwLock,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
@@ -9,15 +9,8 @@ use std::{
 
 use std::path::PathBuf;
 
-use eldenring_util::system::wait_for_system_init;
-use fromsoftware_shared::program::Program;
-
 use crate::{
     debug_log,
-    overlay::data::{
-        save_run_state, BossRegions, PersistedRunState, PhaseActionSet, RegionSchedule,
-        SharedState,
-    },
     er::{
         events::{
             build_cache, read_entry_size, read_from_flag_location, read_root,
@@ -25,7 +18,12 @@ use crate::{
         },
         gamedata::{read_death_count, read_in_game_time, try_resolve_gamedataman},
         inventory::get_key_item_quantity,
-        stats::{try_apply_region_stats, RegionStatProfile},
+        item_spawn::request_weapon_grant,
+        stats::{RegionStatProfile, try_apply_region_stats},
+    },
+    overlay::data::{
+        BossRegions, PersistedRunState, PhaseActionSet, RegionSchedule, RegionStatProfiles,
+        SharedState, save_run_state,
     },
 };
 
@@ -41,82 +39,6 @@ fn active_phase_index(schedule: &RegionSchedule, igt_seconds: u32) -> Option<usi
     }
 
     None
-}
-
-fn region_stat_profile(region_name: &str) -> Option<RegionStatProfile> {
-    match region_name {
-        "Limgrave" => Some(RegionStatProfile {
-            vigor: 30,
-            mind: 10,
-            endurance: 15,
-            strength: 10,
-            dexterity: 10,
-            intelligence: 10,
-            faith: 10,
-            arcane: 10,
-        }),
-        "Liurnia of the Lakes" => Some(RegionStatProfile {
-            vigor: 40,
-            mind: 30,
-            endurance: 12,
-            strength: 8,
-            dexterity: 12,
-            intelligence: 60,
-            faith: 10,
-            arcane: 10,
-        }),
-        "Caelid" => Some(RegionStatProfile {
-            vigor: 50,
-            mind: 10,
-            endurance: 20,
-            strength: 50,
-            dexterity: 18,
-            intelligence: 1,
-            faith: 1,
-            arcane: 50,
-        }),
-        "Altus Plateau" => Some(RegionStatProfile {
-            vigor: 50,
-            mind: 20,
-            endurance: 20,
-            strength: 15,
-            dexterity: 15,
-            intelligence: 12,
-            faith: 80,
-            arcane: 10,
-        }),
-        "Mt. Gelmir" => Some(RegionStatProfile {
-            vigor: 50,
-            mind: 12,
-            endurance: 20,
-            strength: 20,
-            dexterity: 80,
-            intelligence: 10,
-            faith: 12,
-            arcane: 10,
-        }),
-        "Mountaintops of the Giants" => Some(RegionStatProfile {
-            vigor: 60,
-            mind: 12,
-            endurance: 20,
-            strength: 80,
-            dexterity: 20,
-            intelligence: 10,
-            faith: 12,
-            arcane: 10,
-        }),
-        "ShadowRealm" => Some(RegionStatProfile {
-            vigor: 60,
-            mind: 18,
-            endurance: 25,
-            strength: 50,
-            dexterity: 50,
-            intelligence: 20,
-            faith: 20,
-            arcane: 20,
-        }),
-        _ => None,
-    }
 }
 
 fn boss_region_for_flag<'a>(boss_regions: &'a BossRegions, flag_id: i32) -> Option<&'a str> {
@@ -145,7 +67,7 @@ unsafe fn set_event_flag(evtflagman: *const u8, flag_id: i32, enabled: bool) -> 
         return false;
     }
 
-    write_flag(evtflagman, flag_id, enabled)
+    unsafe { write_flag(evtflagman, flag_id, enabled) }
 }
 
 unsafe fn apply_action_set(
@@ -166,17 +88,17 @@ unsafe fn apply_action_set(
 
     if enable_mode {
         for &flag_id in &actions.set_flags_on {
-            let _ = set_event_flag(evtflagman, flag_id, true);
+            let _ = unsafe { set_event_flag(evtflagman, flag_id, true) };
         }
         for &flag_id in &actions.set_flags_off {
-            let _ = set_event_flag(evtflagman, flag_id, false);
+            let _ = unsafe { set_event_flag(evtflagman, flag_id, false) };
         }
     } else {
         for &flag_id in &actions.set_flags_on {
-            let _ = set_event_flag(evtflagman, flag_id, false);
+            let _ = unsafe { set_event_flag(evtflagman, flag_id, false) };
         }
         for &flag_id in &actions.set_flags_off {
-            let _ = set_event_flag(evtflagman, flag_id, true);
+            let _ = unsafe { set_event_flag(evtflagman, flag_id, true) };
         }
     }
 }
@@ -186,6 +108,10 @@ pub fn start_game_monitor(
     igt: Arc<RwLock<u32>>,
     boss_regions: BossRegions,
     schedule: RegionSchedule,
+    stat_profiles: Option<RegionStatProfiles>,
+    route_actions_enabled: bool,
+    stat_profiles_enabled: bool,
+    item_spawns_enabled: bool,
     key_item_id: i32,
     poll_ms: u64,
     stop: Arc<AtomicBool>,
@@ -200,21 +126,35 @@ pub fn start_game_monitor(
     let great_rune_flags = vec![181, 182, 183, 184, 185, 186, 187];
 
     thread::spawn(move || unsafe {
-        wait_for_system_init(&Program::current(), Duration::MAX)
-            .expect("Timeout waiting for system init");
+        debug_log!("[ignite_overlay] Monitor thread started; resolving managers...");
 
         let mut gamedataman: *const u8 = std::ptr::null();
         let mut evtflagman: *const u8 = std::ptr::null();
 
         if gamedataman.is_null() || evtflagman.is_null() {
             let mut delay = 250;
+            let mut attempts = 0u32;
             loop {
                 let game_opt = try_resolve_gamedataman();
                 let evt_opt = try_resolve_eventflagman();
                 if let (Some(evt), Some(gdm)) = (evt_opt, game_opt) {
                     gamedataman = gdm;
                     evtflagman = evt;
+                    debug_log!(
+                        "[ignite_overlay] Resolved managers: GameDataMan=0x{:x}, EventFlagMan=0x{:x}",
+                        gamedataman as usize,
+                        evtflagman as usize
+                    );
                     break;
+                }
+                attempts += 1;
+                if attempts == 1 || attempts % 10 == 0 {
+                    debug_log!(
+                        "[ignite_overlay] Waiting for managers: GameDataMan={} EventFlagMan={} attempts={}",
+                        game_opt.is_some(),
+                        evt_opt.is_some(),
+                        attempts
+                    );
                 }
                 if delay < 2000 {
                     delay *= 2;
@@ -272,7 +212,8 @@ pub fn start_game_monitor(
             }
 
             let cur_root = read_root(evtflagman);
-            if cur_root != last_root || boss_cache.is_empty() || rune_cache.is_empty() {
+            let boss_cache_needs_rebuild = !flag_ids.is_empty() && boss_cache.is_empty();
+            if cur_root != last_root || boss_cache_needs_rebuild || rune_cache.is_empty() {
                 let new_boss_cache = build_cache(evtflagman, &flag_ids);
                 let new_rune_cache = build_cache(evtflagman, &great_rune_flags);
                 let confirm_root = read_root(evtflagman);
@@ -367,6 +308,14 @@ pub fn start_game_monitor(
             };
 
             let mut changed = false;
+
+            if !now_initialized && was_initialized {
+                fired_enter_once.clear();
+                debug_log!(
+                    "[ignite_overlay] Run became uninitialized; cleared phase enter-once actions"
+                );
+                changed = true;
+            }
 
             for (&flag_id, loc) in &boss_cache {
                 if loc.base.is_null() {
@@ -535,25 +484,43 @@ pub fn start_game_monitor(
 
                 if let Some(old_idx) = prev_phase_index {
                     let old_phase = &schedule.phases[old_idx];
-                    apply_action_set(evtflagman, old_phase.on_exit.as_ref(), true);
-                    apply_action_set(evtflagman, old_phase.while_active.as_ref(), false);
+                    if route_actions_enabled {
+                        apply_action_set(evtflagman, old_phase.on_exit.as_ref(), true);
+                        apply_action_set(evtflagman, old_phase.while_active.as_ref(), false);
+                    }
                 }
 
                 if let Some(new_idx) = new_phase_index {
                     let new_phase = &schedule.phases[new_idx];
 
                     if !fired_enter_once.contains(&new_idx) {
-                        apply_action_set(evtflagman, new_phase.on_enter_once.as_ref(), true);
+                        if route_actions_enabled {
+                            apply_action_set(evtflagman, new_phase.on_enter_once.as_ref(), true);
+                        }
+
+                        if item_spawns_enabled {
+                            if let Some(actions) = new_phase.on_enter_once.as_ref() {
+                                for &weapon_id in &actions.spawn_weapons {
+                                    request_weapon_grant(weapon_id, 1);
+                                }
+                            }
+                        }
+
                         fired_enter_once.insert(new_idx);
                     }
 
-                    apply_action_set(evtflagman, new_phase.while_active.as_ref(), true);
+                    if route_actions_enabled {
+                        apply_action_set(evtflagman, new_phase.while_active.as_ref(), true);
+                    }
                 }
             }
 
-            if region_changed || first_init_apply {
-                if let Some(profile) = region_stat_profile(&new_region_name) {
-                    match try_apply_region_stats(profile) {
+            if stat_profiles_enabled && (region_changed || first_init_apply) {
+                if let Some(profile) = stat_profiles
+                    .as_ref()
+                    .and_then(|profiles| region_stat_profile(profiles, &new_region_name))
+                {
+                    match try_apply_region_stats(*profile) {
                         Ok(()) => {
                             debug_log!(
                                 "[ignite_overlay] Applied region stat profile for '{}'",
@@ -586,7 +553,9 @@ pub fn start_game_monitor(
             );
 
             if changed {
-                debug_log!("[ignite_overlay] Change detected during monitoring. Updating app state.");
+                debug_log!(
+                    "[ignite_overlay] Change detected during monitoring. Updating app state."
+                );
                 let mut w = state.write().unwrap();
                 w.event_flags = prev_flags;
                 w.key_item_quantity = new_qty;
@@ -609,4 +578,78 @@ pub fn start_game_monitor(
 
         debug_log!("[ignite_overlay] Monitor thread exiting gracefully");
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::er::stats::RegionStatProfile;
+    use std::collections::HashMap;
+
+    fn phase(
+        name: &str,
+        region_name: &str,
+        duration_minutes: u64,
+    ) -> crate::overlay::data::SchedulePhase {
+        crate::overlay::data::SchedulePhase {
+            name: name.to_string(),
+            region_name: region_name.to_string(),
+            duration_minutes,
+            on_enter_once: None,
+            while_active: None,
+            on_exit: None,
+        }
+    }
+
+    #[test]
+    fn active_phase_uses_cumulative_phase_durations() {
+        let schedule = RegionSchedule {
+            schedule_name: "test".to_string(),
+            count_mode: "strict".to_string(),
+            time_basis: "igt".to_string(),
+            phases: vec![
+                phase("one", "Limgrave", 10),
+                phase("two", "Liurnia of the Lakes", 5),
+            ],
+        };
+
+        assert_eq!(active_phase_index(&schedule, 0), Some(0));
+        assert_eq!(active_phase_index(&schedule, 599), Some(0));
+        assert_eq!(active_phase_index(&schedule, 600), Some(1));
+        assert_eq!(active_phase_index(&schedule, 899), Some(1));
+        assert_eq!(active_phase_index(&schedule, 900), None);
+    }
+
+    #[test]
+    fn region_stat_profile_lookup_is_case_insensitive() {
+        let mut profiles = HashMap::new();
+        profiles.insert(
+            "Limgrave".to_string(),
+            RegionStatProfile {
+                vigor: 30,
+                mind: 10,
+                endurance: 15,
+                strength: 10,
+                dexterity: 10,
+                intelligence: 10,
+                faith: 10,
+                arcane: 10,
+            },
+        );
+
+        let profile = region_stat_profile(&profiles, "limgrave").unwrap();
+
+        assert_eq!(profile.vigor, 30);
+    }
+}
+
+fn region_stat_profile<'a>(
+    profiles: &'a RegionStatProfiles,
+    region_name: &str,
+) -> Option<&'a RegionStatProfile> {
+    profiles.get(region_name).or_else(|| {
+        profiles
+            .iter()
+            .find_map(|(name, profile)| name.eq_ignore_ascii_case(region_name).then_some(profile))
+    })
 }
