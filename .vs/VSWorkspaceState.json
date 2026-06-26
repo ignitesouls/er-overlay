@@ -9,6 +9,6 @@
     "\\src\\overlay",
     "\\src\\util"
   ],
-  "SelectedNode": "\\src\\er\\inventory\\mod.rs",
+  "SelectedNode": "\\src\\overlay\\core.rs",
   "PreviewInSolutionExplorer": false
 }

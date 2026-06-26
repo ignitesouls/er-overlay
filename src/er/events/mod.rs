@@ -23,7 +23,7 @@ use crate::debug_log;
 use crate::er::{
     get_text_section, parse_pattern, read_i32, read_ptr, read_u8, read_u64, scan_pattern,
 };
-use std::{ptr, slice};
+use std::{ptr, sync::OnceLock};
 
 //
 // ----------------------------------------------------
@@ -70,44 +70,33 @@ pub struct FlagLocation {
 //
 
 pub unsafe fn find_event_flag_manager_ptr() -> Option<*const *const u8> {
-    let (base, size) = get_text_section()?;
-    let pattern =
-        parse_pattern("48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? 00 00 44 8B E6 85 C0 0F 84 ?? ?? 00 00");
-    let match_addr = scan_pattern(base, size, &pattern)?;
-    debug_log!(
-        "[ignite_overlay] Found GLOBAL_CSEventFlagMan pattern at 0x{:x}",
-        match_addr as usize
-    );
+    static EVENT_FLAG_MAN_GLOBAL: OnceLock<usize> = OnceLock::new();
 
-    // Show hex dump for clarity
-    let dump = slice::from_raw_parts(match_addr, 32);
-    let mut line = String::new();
-    for (i, b) in dump.iter().enumerate() {
-        use std::fmt::Write;
-        let _ = write!(&mut line, "{:02X} ", b);
-        if (i + 1) % 16 == 0 {
-            debug_log!("[ignite_overlay]    {}", line);
-            line.clear();
-        }
+    if let Some(ptr_addr) = EVENT_FLAG_MAN_GLOBAL.get() {
+        return Some(*ptr_addr as *const *const u8);
     }
 
-    // Displacement at +3 (RIP-relative LEA)
-    let disp = read_i32(match_addr.add(3), "GLOBAL_CSEventFlagMan displacement")?;
-    let rip_next = match_addr.add(8);
-    let ptr_addr = rip_next.offset(disp as isize);
+    let (base, size) = unsafe { get_text_section()? };
+    let pattern =
+        parse_pattern("48 83 3D ?? ?? ?? ?? 00 0F 84 ?? ?? 00 00 44 8B E6 85 C0 0F 84 ?? ?? 00 00");
+    let match_addr = unsafe { scan_pattern(base, size, &pattern)? };
 
+    let disp = unsafe { read_i32(match_addr.add(3), "GLOBAL_CSEventFlagMan displacement")? };
+    let rip_next = unsafe { match_addr.add(8) };
+    let ptr_addr = unsafe { rip_next.offset(disp as isize) } as usize;
+    let ptr_addr = if ptr_addr % 8 == 0 {
+        ptr_addr
+    } else {
+        (ptr_addr + 7) & !7
+    };
+
+    let _ = EVENT_FLAG_MAN_GLOBAL.set(ptr_addr);
     debug_log!(
-        "[ignite_overlay] ➜ computed GLOBAL_CSEventFlagMan @ 0x{:x}",
-        ptr_addr as usize
+        "[ignite_overlay] Resolved GLOBAL_CSEventFlagMan @ 0x{:x}",
+        ptr_addr
     );
 
-    // Ensure 8-byte alignment
-    Some(if (ptr_addr as usize) % 8 == 0 {
-        ptr_addr as *const *const u8
-    } else {
-        let aligned = (ptr_addr as usize + 7) & !7;
-        aligned as *const *const u8
-    })
+    Some(ptr_addr as *const *const u8)
 }
 
 /// Try to resolve EventFlagMan pointer directly

@@ -1,0 +1,40 @@
+{
+  "schedule_name": "default_event_flags",
+  "always_on_flags": [],
+  "interval_rules": [
+    {
+      "name": "Special Events:",
+      "set_flags_on": [1033640001, 1033640002, 1033640005, 1033640007, 1033640008],
+      "set_flags_off": [],
+      "flag_labels": {
+        "1033640001": "SLOW DOWN",
+        "1033640002": "LE ABYSSAL WOODS",
+        "1033640005": "Death Blight",
+        "1033640007": "IGNITE!",
+        "1033640008": "?"
+      },
+      "randomize_flags": true,
+      "random_min_flags": 1,
+      "random_max_flags": 5,
+      "interval_minutes": 2,
+      "remove_after_seconds": 60,
+      "start_after_seconds": 0
+    },
+    {
+      "name": "Special Events 2:",
+      "set_flags_on": [1033640003, 1033640004, 1033640006],
+      "set_flags_off": [],
+      "flag_labels": {
+        "1033640003": "NO STAM?",
+        "1033640004": "WARPING NOT INCLUDED",
+        "1033640006": "Press X"
+      },
+      "randomize_flags": true,
+      "random_min_flags": 1,
+      "random_max_flags": 3,
+      "interval_minutes": 1,
+      "remove_after_seconds": 30,
+      "start_after_seconds": 0
+    }
+  ]
+}

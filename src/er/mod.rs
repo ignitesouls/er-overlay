@@ -5,7 +5,6 @@ pub mod gamedata;
 pub mod grace;
 pub mod inventory;
 pub mod item_spawn;
-pub mod stats;
 
 use crate::debug_log;
 use std::{mem, ptr, slice};
@@ -23,7 +22,7 @@ use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
 #[inline(always)]
 pub unsafe fn read_typed<T: Copy + Default>(addr: *const u8, label: &str) -> Option<T> {
     if addr.is_null() {
-        debug_log!("[ignite_overlay] ❌ null pointer @ {label}");
+        debug_log!("[ignite_overlay] âŒ null pointer @ {label}");
         return None;
     }
     let align = mem::align_of::<T>();
@@ -31,7 +30,7 @@ pub unsafe fn read_typed<T: Copy + Default>(addr: *const u8, label: &str) -> Opt
 
     if (addr as usize) % align != 0 {
         debug_log!(
-            "[ignite_overlay] ⚠ misaligned read({label}) @ 0x{:x}, copying manually",
+            "[ignite_overlay] âš  misaligned read({label}) @ 0x{:x}, copying manually",
             addr as usize
         );
         let mut tmp = T::default();

@@ -14,19 +14,15 @@ use crate::{
     overlay::{
         core::start_game_monitor,
         data::{
-            AppState, BossRegions, PersistedRunState, RegionSchedule, RegionStatProfiles,
-            SchedulePhase, create_state, load_localized_boss_data, load_region_schedule,
-            load_region_stat_profiles, load_run_state, save_run_state,
+            AppState, BossRegions, EventFlagSchedule, create_state, load_event_flag_schedule,
+            load_localized_boss_data,
         },
         style::{
             DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config,
             apply_style_config, parse_key_combo, read_config,
         },
     },
-    util::{
-        debug::attach_console, introspection::get_dll_directory,
-        text_formatter::format_display_text,
-    },
+    util::{introspection::get_dll_directory, text_formatter::format_display_text},
 };
 
 pub struct EROverlayUi {
@@ -48,17 +44,13 @@ pub struct EROverlayUi {
     state: Arc<RwLock<AppState>>,
     igt: Arc<RwLock<u32>>,
     boss_regions: Option<BossRegions>,
-    region_schedule: Option<RegionSchedule>,
-    stat_profiles: Option<RegionStatProfiles>,
+    event_flag_schedule: Option<EventFlagSchedule>,
 
     timer_mode: TimerMode,
     prep_time_ms: u32,
     timer_target_ms: u32,
 
     monitor_stop: Arc<AtomicBool>,
-
-    dll_dir: Option<std::path::PathBuf>,
-    seed_id: String,
 }
 
 impl EROverlayUi {
@@ -108,29 +100,13 @@ impl EROverlayUi {
             .filter(|s| !s.is_empty())
             .unwrap_or("bosses.json");
 
-        let schedule_file = config
+        let event_flag_file = config
             .as_ref()
-            .and_then(|c| c.boss.as_ref())
-            .and_then(|cc| cc.schedule_file.as_ref())
+            .and_then(|c| c.event_flags.as_ref())
+            .and_then(|s| s.file.as_ref())
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .unwrap_or("region_schedule.json");
-
-        let profile_file = config
-            .as_ref()
-            .and_then(|c| c.boss.as_ref())
-            .and_then(|cc| cc.profile_file.as_ref())
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .unwrap_or("region_profiles.json");
-
-        let seed_id = config
-            .as_ref()
-            .and_then(|c| c.boss.as_ref())
-            .and_then(|cc| cc.seed.as_ref())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "default_seed".to_string());
+            .unwrap_or("player_event_flags.json");
 
         let dll_dir = get_dll_directory();
 
@@ -138,13 +114,9 @@ impl EROverlayUi {
             .as_ref()
             .and_then(|dir| load_localized_boss_data(dir, language, data_file));
 
-        let region_schedule = dll_dir
+        let event_flag_schedule = dll_dir
             .as_ref()
-            .and_then(|dir| load_region_schedule(dir, schedule_file));
-
-        let stat_profiles = dll_dir
-            .as_ref()
-            .and_then(|dir| load_region_stat_profiles(dir, profile_file));
+            .and_then(|dir| load_event_flag_schedule(dir, event_flag_file));
 
         let timer_mode = config
             .as_ref()
@@ -182,391 +154,91 @@ impl EROverlayUi {
             state: create_state(),
             igt: Arc::new(RwLock::new(0)),
             boss_regions,
-            region_schedule,
-            stat_profiles,
+            event_flag_schedule,
             timer_mode,
             prep_time_ms,
             timer_target_ms,
             monitor_stop: Arc::new(AtomicBool::new(false)),
-            dll_dir,
-            seed_id,
         }
     }
 
-    fn route_region_names_in_order(&self) -> Vec<String> {
-        let Some(schedule) = self.region_schedule.as_ref() else {
-            return Vec::new();
-        };
-
-        let mut names = Vec::new();
-        for phase in &schedule.phases {
-            if !names.contains(&phase.region_name) {
-                names.push(phase.region_name.clone());
-            }
-        }
-        names
-    }
-
-    fn build_route_string(&self, current_region: &str) -> String {
-        self.route_region_names_in_order()
-            .into_iter()
-            .map(|region_name| {
-                if !current_region.is_empty() && region_name == current_region {
-                    format!("[{}]", region_name)
-                } else {
-                    region_name
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" -> ")
-    }
-
-    fn build_route_totals(&self) -> (usize, usize) {
-        let route_regions = self.route_region_names_in_order();
-
-        let mut total_possible = 0usize;
-        let mut total_killed = 0usize;
-
-        let Some(all_regions) = self.boss_regions.as_ref() else {
-            return (0, 0);
-        };
-
-        let Ok(state) = self.state.read() else {
-            return (0, 0);
-        };
-
-        for region_name in route_regions {
-            if let Some(region) = all_regions.iter().find(|r| r.region_name == region_name) {
-                total_possible += region.bosses.len();
-                total_killed += region
-                    .bosses
-                    .iter()
-                    .filter(|b| state.counted_flags.contains(&b.flag_id))
-                    .count();
-            }
-        }
-
-        (total_killed, total_possible)
-    }
-
-    fn route_total_duration_seconds(&self) -> u32 {
-        self.region_schedule
+    fn collect_boss_flags(&self) -> Vec<i32> {
+        self.boss_regions
             .as_ref()
-            .map(|schedule| {
-                schedule
-                    .phases
+            .map(|regions| {
+                regions
                     .iter()
-                    .map(|phase| phase.duration_minutes.saturating_mul(60) as u32)
-                    .sum()
+                    .flat_map(|region| region.bosses.iter().map(|boss| boss.flag_id))
+                    .collect()
             })
+            .unwrap_or_default()
+    }
+
+    fn boss_total(&self) -> usize {
+        self.boss_regions
+            .as_ref()
+            .map(|regions| regions.iter().map(|region| region.bosses.len()).sum())
             .unwrap_or(0)
     }
-
-    fn route_is_complete(&self) -> bool {
-        let total_seconds = self.route_total_duration_seconds();
-        if total_seconds == 0 {
-            return false;
-        }
-
-        self.igt
-            .read()
-            .map(|seconds| *seconds >= total_seconds)
-            .unwrap_or(false)
-    }
-
-    fn route_status_text(&self) -> String {
-        if self.route_is_complete() {
-            "RUN COMPLETE".to_string()
-        } else {
-            "Running".to_string()
-        }
-    }
-
-    fn build_current_region_totals(&self, current_region: &str) -> (usize, usize) {
-        if current_region.is_empty() {
-            return (0, 0);
-        }
-
-        let Some(all_regions) = self.boss_regions.as_ref() else {
-            return (0, 0);
-        };
-
-        let Ok(state) = self.state.read() else {
-            return (0, 0);
-        };
-
-        if let Some(region) = all_regions
-            .iter()
-            .find(|r| r.region_name.eq_ignore_ascii_case(current_region))
-        {
-            let total_possible = region.bosses.len();
-            let total_killed = region
-                .bosses
-                .iter()
-                .filter(|b| state.counted_flags.contains(&b.flag_id))
-                .count();
-
-            (total_killed, total_possible)
-        } else {
-            (0, 0)
-        }
-    }
-
-    fn boss_totals_for_region(
-        &self,
-        region_name: &str,
-        counted_flags: &std::collections::HashSet<i32>,
-    ) -> (usize, usize) {
-        let Some(all_regions) = self.boss_regions.as_ref() else {
-            return (0, 0);
-        };
-
-        all_regions
-            .iter()
-            .find(|r| r.region_name.eq_ignore_ascii_case(region_name))
-            .map(|region| {
-                let total = region.bosses.len();
-                let defeated = region
-                    .bosses
-                    .iter()
-                    .filter(|boss| counted_flags.contains(&boss.flag_id))
-                    .count();
-                (defeated, total)
-            })
-            .unwrap_or((0, 0))
-    }
-
-    fn render_route_overview(&self, ui: &Ui) {
-        let Some(schedule) = self.region_schedule.as_ref() else {
-            ui.text("Route: no region schedule loaded");
-            return;
-        };
-
-        let Ok(state) = self.state.read() else {
-            ui.text("Route: waiting for state");
-            return;
-        };
-
-        let active_phase = state.active_phase_index;
-        let counted_flags = state.counted_flags.clone();
-        let total_duration = self.route_total_duration_seconds();
-        let current_igt = self.igt.read().map(|seconds| *seconds).unwrap_or(0);
-        let route_complete = total_duration > 0 && current_igt >= total_duration;
-        let (route_kills, route_total) = self.build_route_totals();
-
-        ui.separator();
-        ui.text_colored(
-            [0.70, 0.88, 1.00, 1.0],
-            format!("Route  {}", schedule.schedule_name),
-        );
-        ui.text_colored(
-            if route_complete {
-                [0.45, 1.00, 0.65, 1.0]
-            } else {
-                [1.00, 0.78, 0.42, 1.0]
-            },
-            if route_complete {
-                format!("RUN COMPLETE  Final Points {}/{}", route_kills, route_total)
-            } else {
-                format!("Running  Total Points {}/{}", route_kills, route_total)
-            },
-        );
-        ui.separator();
-
-        let mut start_seconds = 0u32;
-        for (idx, phase) in schedule.phases.iter().enumerate() {
-            let duration_seconds = phase.duration_minutes.saturating_mul(60) as u32;
-            let end_seconds = start_seconds.saturating_add(duration_seconds);
-            let (defeated, total) = self.boss_totals_for_region(&phase.region_name, &counted_flags);
-
-            let status = if Some(idx) == active_phase {
-                "CURRENT"
-            } else if route_complete || Some(idx) < active_phase {
-                "DONE"
-            } else {
-                "NEXT"
-            };
-
-            let status_color = match status {
-                "CURRENT" => [1.00, 0.78, 0.42, 1.0],
-                "DONE" => [0.45, 1.00, 0.65, 1.0],
-                _ => [0.70, 0.76, 0.82, 1.0],
-            };
-
-            ui.text_colored(status_color, format!("{:>7}", status));
-            ui.same_line();
-            ui.text(format!(
-                " {:02}:{:02}-{:02}:{:02}  {}",
-                start_seconds / 60,
-                start_seconds % 60,
-                end_seconds / 60,
-                end_seconds % 60,
-                phase.region_name
-            ));
-            ui.text_colored(
-                [0.80, 0.84, 0.88, 1.0],
-                format!("        {}  Points {}/{}", phase.name, defeated, total),
-            );
-
-            start_seconds = end_seconds;
-        }
-
-        ui.separator();
-    }
-
-    fn fallback_region_schedule() -> RegionSchedule {
-        RegionSchedule {
-            schedule_name: "fallback".to_string(),
-            count_mode: "strict".to_string(),
-            time_basis: "igt".to_string(),
-            phases: vec![SchedulePhase {
-                name: "Fallback".to_string(),
-                region_name: "Unscheduled".to_string(),
-                duration_minutes: 1_000_000,
-                on_enter_once: None,
-                while_active: None,
-                on_exit: None,
-            }],
-        }
-    }
-
-    fn render_closed(&mut self, ui: &Ui) {
+    fn snapshot_vars(&mut self) -> HashMap<&'static str, String> {
         self.write_igt();
 
-        let mut death_count: u32 = 0;
-        let mut shard_count: u32 = 0;
-        let mut great_runes_count = 0;
-        let mut region_name = String::new();
-        let mut phase_name = String::new();
-
-        if let Ok(state) = self.state.read() {
-            shard_count = state.key_item_quantity;
-            death_count = state.death_count;
-            great_runes_count = state.great_runes;
-            region_name = state.active_region_name.clone();
-
-            if let (Some(schedule), Some(phase_idx)) =
-                (self.region_schedule.as_ref(), state.active_phase_index)
-            {
-                if let Some(phase) = schedule.phases.get(phase_idx) {
-                    phase_name = phase.name.clone();
-                }
-            }
-        }
-
-        let (defeated, total) = self.build_current_region_totals(&region_name);
-        let route_regions = self.build_route_string(&region_name);
-        let (route_kills, route_total) = self.build_route_totals();
-        let route_status = self.route_status_text();
-
-        let vars = {
-            let igt_str = self.timer_buf.clone();
-            HashMap::from([
-                ("kills", defeated.to_string()),
-                ("total", total.to_string()),
-                ("counted_kills", defeated.to_string()),
-                ("counted_total", total.to_string()),
-                ("deaths", death_count.to_string()),
-                ("igt", igt_str),
-                ("shards", shard_count.to_string()),
-                ("runes", great_runes_count.to_string()),
-                ("region", region_name),
-                ("phase", phase_name),
-                ("route", route_regions.clone()),
-                ("route_names", route_regions),
-                ("route_total", route_total.to_string()),
-                ("route_kills", route_kills.to_string()),
-                ("total_points", route_kills.to_string()),
-                ("point_total", route_total.to_string()),
-                ("route_status", route_status),
-            ])
+        let boss_total = self.boss_total();
+        let (defeated, deaths, shards, runes, current_events) = if let Ok(state) = self.state.read()
+        {
+            (
+                state.event_flags.values().filter(|&&flag| flag).count(),
+                state.death_count,
+                state.key_item_quantity,
+                state.great_runes,
+                state.current_events.clone(),
+            )
+        } else {
+            (0, 0, 0, 0, String::new())
         };
 
+        HashMap::from([
+            ("kills", defeated.to_string()),
+            ("total", boss_total.to_string()),
+            ("counted_kills", defeated.to_string()),
+            ("counted_total", boss_total.to_string()),
+            ("deaths", deaths.to_string()),
+            ("igt", self.timer_buf.clone()),
+            ("shards", shards.to_string()),
+            ("runes", runes.to_string()),
+            ("current_events", current_events),
+        ])
+    }
+
+    fn template_lines(&mut self) -> Vec<String> {
+        let vars = self.snapshot_vars();
         let template = self
             .config
             .as_ref()
             .and_then(|c| c.overlay.as_ref())
             .and_then(|o| o.display_text.as_deref())
             .unwrap_or(DEFAULT_DISPLAY_TEXT);
+        format_display_text(template, &vars)
+    }
 
-        let lines = format_display_text(template, &vars);
-        Self::render_centered_text_block(ui, &lines);
+    fn render_closed(&mut self, ui: &Ui) {
+        let lines = self.template_lines();
+        Self::render_metric_block(ui, &lines, true);
 
         let total_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
-
         if Self::is_click_in_header(ui, total_h) {
             let now = Instant::now();
             if now.duration_since(self.last_toggle_time) > Duration::from_millis(300) {
                 self.full_mode = true;
                 self.last_toggle_time = now;
-                debug_log!("[ignite_overlay] Clicked compact overlay — expanding");
+                debug_log!("[ignite_overlay] Clicked compact overlay - expanding");
             }
         }
     }
 
     fn render_open(&mut self, ui: &Ui) {
-        self.write_igt();
-
-        let mut death_count: u32 = 0;
-        let mut shard_count: u32 = 0;
-        let mut great_runes_count = 0;
-        let mut region_name = String::new();
-        let mut phase_name = String::new();
-
-        if let Ok(state) = self.state.read() {
-            shard_count = state.key_item_quantity;
-            death_count = state.death_count;
-            great_runes_count = state.great_runes;
-            region_name = state.active_region_name.clone();
-
-            if let (Some(schedule), Some(phase_idx)) =
-                (self.region_schedule.as_ref(), state.active_phase_index)
-            {
-                if let Some(phase) = schedule.phases.get(phase_idx) {
-                    phase_name = phase.name.clone();
-                }
-            }
-        }
-
-        let (defeated, total) = self.build_current_region_totals(&region_name);
-        let route_regions = self.build_route_string(&region_name);
-        let (route_kills, route_total) = self.build_route_totals();
-        let route_status = self.route_status_text();
-
-        let vars = {
-            let igt_str = self.timer_buf.clone();
-            HashMap::from([
-                ("kills", defeated.to_string()),
-                ("total", total.to_string()),
-                ("counted_kills", defeated.to_string()),
-                ("counted_total", total.to_string()),
-                ("deaths", death_count.to_string()),
-                ("igt", igt_str),
-                ("shards", shard_count.to_string()),
-                ("runes", great_runes_count.to_string()),
-                ("region", region_name.clone()),
-                ("phase", phase_name.clone()),
-                ("route", route_regions.clone()),
-                ("route_names", route_regions),
-                ("route_total", route_total.to_string()),
-                ("route_kills", route_kills.to_string()),
-                ("total_points", route_kills.to_string()),
-                ("point_total", route_total.to_string()),
-                ("route_status", route_status),
-            ])
-        };
-
-        let template = self
-            .config
-            .as_ref()
-            .and_then(|c| c.overlay.as_ref())
-            .and_then(|o| o.display_text.as_deref())
-            .unwrap_or(DEFAULT_DISPLAY_TEXT);
-
-        let lines = format_display_text(template, &vars);
-        for line in lines.clone() {
-            ui.text(line);
-        }
+        let lines = self.template_lines();
+        Self::render_metric_block(ui, &lines, false);
 
         let header_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
         if Self::is_click_in_header(ui, header_h) {
@@ -574,64 +246,59 @@ impl EROverlayUi {
             if now.duration_since(self.last_toggle_time) > Duration::from_millis(300) {
                 self.full_mode = false;
                 self.last_toggle_time = now;
-                debug_log!("[ignite_overlay] Clicked header — collapsing overlay");
+                debug_log!("[ignite_overlay] Clicked header - collapsing overlay");
             }
         }
 
-        self.render_route_overview(ui);
+        self.render_boss_list(ui);
+    }
 
-        let avail = ui.content_region_avail();
+    fn render_boss_list(&self, ui: &Ui) {
+        ui.spacing();
+        ui.separator();
+        ui.spacing();
+        ui.text_colored([0.72, 0.78, 0.82, 0.92], "BOSSES");
+        ui.spacing();
+
+        let Some(regions) = self.boss_regions.as_ref() else {
+            ui.text("Boss data not loaded");
+            return;
+        };
+
+        let Ok(state) = self.state.read() else {
+            ui.text("Boss state not ready");
+            return;
+        };
+
         let child = ui
             .child_window("BossListRegion")
-            .size(avail)
+            .size(ui.content_region_avail())
             .border(false)
             .begin();
 
         if let Some(_child_token) = child {
-            if let Some(data) = self.boss_regions.as_ref() {
-                if let Ok(state) = self.state.read() {
-                    let flags = &state.event_flags;
-                    let active_region = state.active_region_name.clone();
-                    let route_regions = self.route_region_names_in_order();
+            for group in regions {
+                let defeated = group
+                    .bosses
+                    .iter()
+                    .filter(|boss| *state.event_flags.get(&boss.flag_id).unwrap_or(&false))
+                    .count();
+                let total = group.bosses.len();
 
-                    for region_name in route_regions {
-                        let Some(region) = data
-                            .iter()
-                            .find(|r| r.region_name.eq_ignore_ascii_case(&region_name))
-                        else {
-                            continue;
-                        };
-
-                        let defeated = region
-                            .bosses
-                            .iter()
-                            .filter(|b| *flags.get(&b.flag_id).unwrap_or(&false))
-                            .count();
-                        let total = region.bosses.len();
-
-                        let label = if region.region_name == active_region {
-                            format!("CURRENT  {}  {}/{}", region.region_name, defeated, total)
+                let region_label = format!("{}  {}/{}", group.region_name, defeated, total);
+                if let Some(_tree) = ui
+                    .tree_node_config(region_label)
+                    .flags(imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH)
+                    .push()
+                {
+                    for boss in &group.bosses {
+                        let mut checked = *state.event_flags.get(&boss.flag_id).unwrap_or(&false);
+                        let label = if boss.place.is_empty() {
+                            boss.boss.clone()
                         } else {
-                            format!("{}  {}/{}", region.region_name, defeated, total)
+                            format!("{} - {}", boss.boss, boss.place)
                         };
-
-                        if let Some(_t) = ui
-                            .tree_node_config(label)
-                            .flags(imgui::TreeNodeFlags::SPAN_AVAIL_WIDTH)
-                            .push()
-                        {
-                            for boss in &region.bosses {
-                                let mut checked = *flags.get(&boss.flag_id).unwrap_or(&false);
-                                ui.checkbox(
-                                    &format!(
-                                        "{}{}",
-                                        boss.boss,
-                                        if boss.place.is_empty() { "" } else { " " }
-                                    ),
-                                    &mut checked,
-                                );
-                            }
-                        }
+                        ui.checkbox(&label, &mut checked);
                     }
                 }
             }
@@ -641,105 +308,38 @@ impl EROverlayUi {
     }
 
     fn measure_closed_size(&mut self, ui: &Ui) -> (f32, f32) {
-        self.write_igt();
-
-        let (deaths, shards, runes, region_name, phase_name) = if let Ok(state) = self.state.read()
-        {
-            let region_name = state.active_region_name.clone();
-            let phase_name = if let (Some(schedule), Some(phase_idx)) =
-                (self.region_schedule.as_ref(), state.active_phase_index)
-            {
-                schedule
-                    .phases
-                    .get(phase_idx)
-                    .map(|p| p.name.clone())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-
-            (
-                state.death_count,
-                state.key_item_quantity,
-                state.great_runes,
-                region_name,
-                phase_name,
-            )
-        } else {
-            (0, 0, 0, String::new(), String::new())
-        };
-
-        let (defeated, total) = self.build_current_region_totals(&region_name);
-        let route_regions = self.build_route_string(&region_name);
-        let (route_kills, route_total) = self.build_route_totals();
-        let route_status = self.route_status_text();
-
-        let vars = HashMap::from([
-            ("kills", defeated.to_string()),
-            ("total", total.to_string()),
-            ("counted_kills", defeated.to_string()),
-            ("counted_total", total.to_string()),
-            ("deaths", deaths.to_string()),
-            ("igt", self.timer_buf.clone()),
-            ("shards", shards.to_string()),
-            ("runes", runes.to_string()),
-            ("region", region_name),
-            ("phase", phase_name),
-            ("route", route_regions.clone()),
-            ("route_names", route_regions),
-            ("route_total", route_total.to_string()),
-            ("route_kills", route_kills.to_string()),
-            ("total_points", route_kills.to_string()),
-            ("point_total", route_total.to_string()),
-            ("route_status", route_status),
-        ]);
-
-        let template = self
-            .config
-            .as_ref()
-            .and_then(|c| c.overlay.as_ref())
-            .and_then(|o| o.display_text.as_deref())
-            .unwrap_or(DEFAULT_DISPLAY_TEXT);
-
-        let lines = format_display_text(template, &vars);
-
+        let lines = self.template_lines();
         let pad = unsafe { ui.style().window_padding };
-
-        let max_w = lines
-            .iter()
-            .map(|l| ui.calc_text_size(l)[0])
-            .fold(0.0, f32::max);
-
+        let (label_w, value_w) = Self::measure_metric_columns(ui, &lines);
         let total_h = pad[1] * 2.0 + ui.text_line_height_with_spacing() * lines.len() as f32;
-        let total_w = pad[0] * 2.0 + max_w;
-
-        (total_w.ceil() + 4.0, total_h.ceil())
+        let total_w = pad[0] * 2.0 + label_w + 12.0 + value_w;
+        (total_w.ceil().max(260.0), total_h.ceil() + 4.0)
     }
 
     fn write_igt(&mut self) {
         self.timer_buf.clear();
 
-        if let Ok(seconds) = self.igt.read() {
-            let raw_seconds = *seconds as i64;
-            let prep_seconds = (self.prep_time_ms as i64) / 1000;
-            let timer_target_seconds = (self.timer_target_ms as i64) / 1000;
+        if let Ok(ms) = self.igt.read() {
+            let raw_ms = *ms as i64;
+            let prep_ms = self.prep_time_ms as i64;
+            let timer_target_ms = self.timer_target_ms as i64;
 
-            let display_seconds: i64 = match self.timer_mode {
-                TimerMode::Regular => raw_seconds,
-                TimerMode::Timer => timer_target_seconds - raw_seconds,
-                TimerMode::Prep => raw_seconds - prep_seconds,
+            let display_ms = match self.timer_mode {
+                TimerMode::Regular => raw_ms,
+                TimerMode::Timer => timer_target_ms - raw_ms,
+                TimerMode::Prep => raw_ms - prep_ms,
                 TimerMode::PrepTimer => {
-                    if raw_seconds < prep_seconds {
-                        raw_seconds - prep_seconds
+                    if raw_ms < prep_ms {
+                        raw_ms - prep_ms
                     } else {
-                        let after_prep = raw_seconds - prep_seconds;
-                        timer_target_seconds - after_prep
+                        timer_target_ms - (raw_ms - prep_ms)
                     }
                 }
             };
 
-            let is_negative = display_seconds < 0;
-            let total_seconds = display_seconds.abs();
+            let total_seconds = display_ms / 1000;
+            let is_negative = total_seconds < 0;
+            let total_seconds = total_seconds.abs();
 
             if total_seconds > 86_400 {
                 let days = total_seconds / 86_400;
@@ -790,64 +390,113 @@ impl EROverlayUi {
             .into()
     }
 
-    fn render_centered_text_block(ui: &imgui::Ui, lines: &[String]) {
-        let line_h = ui.text_line_height_with_spacing();
-        let total_h = line_h * lines.len() as f32;
+    fn metric_parts(line: &str) -> (String, String) {
+        line.split_once(':')
+            .map(|(label, value)| {
+                let value = value.trim();
+                (
+                    format!("{}:", label.trim()),
+                    if value.is_empty() {
+                        "None".to_string()
+                    } else {
+                        value.to_string()
+                    },
+                )
+            })
+            .unwrap_or_else(|| (String::new(), line.trim().to_string()))
+    }
 
-        let avail_h = ui.content_region_avail()[1];
-        let y_offset = (avail_h - total_h) * 0.5;
-        if y_offset > 0.0 {
-            let mut pos = ui.cursor_pos();
-            pos[1] += y_offset;
-            ui.set_cursor_pos(pos);
+    fn measure_metric_columns(ui: &imgui::Ui, lines: &[String]) -> (f32, f32) {
+        lines
+            .iter()
+            .fold((0.0f32, 0.0f32), |(label_max, value_max), line| {
+                let (label, value) = Self::metric_parts(line);
+                (
+                    label_max.max(ui.calc_text_size(&label)[0]),
+                    value_max.max(ui.calc_text_size(&value)[0]),
+                )
+            })
+    }
+
+    fn render_metric_block(ui: &imgui::Ui, lines: &[String], centered: bool) {
+        let line_h = ui.text_line_height_with_spacing();
+        if centered {
+            let total_h = line_h * lines.len() as f32;
+            let avail_h = ui.content_region_avail()[1];
+            let y_offset = (avail_h - total_h) * 0.5;
+            if y_offset > 0.0 {
+                let mut pos = ui.cursor_pos();
+                pos[1] += y_offset;
+                ui.set_cursor_pos(pos);
+            }
         }
 
+        let (label_w, value_w) = Self::measure_metric_columns(ui, lines);
         for line in lines {
-            ui.text(line);
+            Self::render_metric_line(ui, line, centered, label_w, value_w);
+        }
+    }
+
+    fn render_metric_line(
+        ui: &imgui::Ui,
+        line: &str,
+        _centered: bool,
+        label_width: f32,
+        _value_width: f32,
+    ) {
+        let (label, value) = Self::metric_parts(line);
+        let label_lower = label.to_ascii_lowercase();
+        let is_effects = label_lower.contains("special effects");
+        let is_time = label_lower.contains("time");
+        let value_color = if is_effects && value != "None" {
+            [0.98, 0.76, 0.34, 1.0]
+        } else if is_time {
+            [0.72, 0.90, 1.0, 1.0]
+        } else {
+            [0.92, 0.96, 0.98, 0.98]
+        };
+
+        let label_color = [0.56, 0.64, 0.70, 0.92];
+        let muted_color = [0.52, 0.58, 0.62, 0.88];
+        let gap = 12.0;
+        let row_x = ui.cursor_pos()[0];
+        let row_y = ui.cursor_pos()[1];
+        if !label.is_empty() {
+            ui.set_cursor_pos([row_x, row_y]);
+            ui.text_colored(label_color, &label);
+            ui.same_line();
+        }
+
+        ui.set_cursor_pos([row_x + label_width + gap, row_y]);
+        let color = if value == "None" {
+            muted_color
+        } else {
+            value_color
+        };
+        let _text_color = ui.push_style_color(imgui::StyleColor::Text, color);
+        if is_effects {
+            ui.text_wrapped(&value);
+        } else {
+            ui.text(&value);
         }
     }
 
     fn simulate_mouse_click(imgui: &mut imgui::Context) {
         use imgui::MouseButton;
-
         let io = imgui.io_mut();
         io.add_mouse_button_event(MouseButton::Left, true);
         io.add_mouse_button_event(MouseButton::Left, false);
-
         debug_log!("[ignite_overlay] Simulated mouse click");
     }
 
-    fn reset_run_progress(&mut self) {
-        if let Ok(mut state) = self.state.write() {
-            state.counted_flags.clear();
-            state.cumulative_counted_kills = 0;
-            state.counted_kills = 0;
-            state.boss_first_kill_time.clear();
-        }
-
-        if let Some(dir) = self.dll_dir.as_ref() {
-            let cleared = PersistedRunState {
-                seed: self.seed_id.clone(),
-                counted_flags: Default::default(),
-                cumulative_counted_kills: 0,
-            };
-            let _ = save_run_state(dir, &cleared);
-        }
-
-        debug_log!(
-            "[ignite_overlay] Run progress reset for seed '{}'",
-            self.seed_id
-        );
-    }
-
     fn combo_down(io: &imgui::Io, keys: &[Key]) -> bool {
-        !keys.is_empty() && keys.iter().all(|&k| io.keys_down[k as usize])
+        !keys.is_empty() && keys.iter().all(|&key| io.keys_down[key as usize])
     }
 
     fn combo_pressed(ui: &imgui::Ui, keys: &[Key]) -> bool {
         !keys.is_empty()
-            && keys.iter().all(|&k| ui.io().keys_down[k as usize])
-            && keys.iter().any(|&k| ui.is_key_pressed(k))
+            && keys.iter().all(|&key| ui.io().keys_down[key as usize])
+            && keys.iter().any(|&key| ui.is_key_pressed(key))
     }
 
     fn is_click_in_header(ui: &imgui::Ui, header_height: f32) -> bool {
@@ -855,10 +504,10 @@ impl EROverlayUi {
         if !io.mouse_down[0] {
             return false;
         }
+
         let mouse_pos = io.mouse_pos;
         let win_pos = ui.window_pos();
         let win_size = ui.window_size();
-
         let inside_x = mouse_pos[0] >= win_pos[0] && mouse_pos[0] <= win_pos[0] + win_size[0];
         let inside_y = mouse_pos[1] >= win_pos[1] && mouse_pos[1] <= win_pos[1] + header_height;
         inside_x && inside_y
@@ -867,9 +516,6 @@ impl EROverlayUi {
 
 impl ImguiRenderLoop for EROverlayUi {
     fn initialize(&mut self, imgui: &mut imgui::Context, ctx: &mut dyn hudhook::RenderContext) {
-        #[cfg(debug_assertions)]
-        attach_console();
-
         debug_log!("[ignite_overlay] Initializing overlay...");
 
         if let Some(cfg) = &self.config {
@@ -896,61 +542,23 @@ impl ImguiRenderLoop for EROverlayUi {
             return;
         }
 
-        let boss_regions = self.boss_regions.clone().unwrap_or_else(|| {
-            debug_log!("[ignite_overlay] No boss regions loaded; starting timer-only monitor.");
-            Vec::new()
-        });
+        let flag_ids = self.collect_boss_flags();
+        debug_log!("[ignite_overlay] Loaded {} boss flags", flag_ids.len());
 
-        let region_schedule = self.region_schedule.clone().unwrap_or_else(|| {
-            debug_log!(
-                "[ignite_overlay] No region schedule loaded; using fallback timer-only schedule."
-            );
-            Self::fallback_region_schedule()
-        });
-
-        if let Some(dir) = self.dll_dir.as_ref() {
-            if let Some(saved) = load_run_state(dir, &self.seed_id) {
-                if let Ok(mut state) = self.state.write() {
-                    state.counted_flags = saved.counted_flags;
-                    state.cumulative_counted_kills = saved.cumulative_counted_kills;
-                    state.counted_kills = state.cumulative_counted_kills;
-
-                    debug_log!(
-                        "[ignite_overlay] Restored saved run state for seed '{}' with {} counted kills",
-                        self.seed_id,
-                        state.cumulative_counted_kills
-                    );
-                }
-            }
-        }
-
-        let key_item_id = 2008021;
-
-        let Some(save_dir) = self.dll_dir.clone() else {
-            debug_log!("[ignite_overlay] No DLL dir available; monitor not started.");
-            return;
-        };
+        let interval_event_flags_enabled = self
+            .config
+            .as_ref()
+            .is_some_and(|cfg| cfg.interval_event_flags_enabled());
 
         start_game_monitor(
             self.state.clone(),
             self.igt.clone(),
-            boss_regions,
-            region_schedule,
-            self.stat_profiles.clone(),
-            self.config
-                .as_ref()
-                .is_some_and(|cfg| cfg.route_actions_enabled()),
-            self.config
-                .as_ref()
-                .is_some_and(|cfg| cfg.stat_profiles_enabled()),
-            self.config
-                .as_ref()
-                .is_some_and(|cfg| cfg.experimental_item_spawn_enabled()),
-            key_item_id,
+            flag_ids,
+            interval_event_flags_enabled,
+            self.event_flag_schedule.clone(),
+            2008021,
             100,
             self.monitor_stop.clone(),
-            save_dir,
-            self.seed_id.clone(),
         );
 
         debug_log!("[ignite_overlay] Game monitor started successfully.");
@@ -958,7 +566,7 @@ impl ImguiRenderLoop for EROverlayUi {
 
     fn before_render(&mut self, imgui: &mut imgui::Context, _ctx: &mut dyn hudhook::RenderContext) {
         let io = imgui.io();
-        let now = std::time::Instant::now();
+        let now = Instant::now();
 
         if self
             .config
@@ -970,7 +578,7 @@ impl ImguiRenderLoop for EROverlayUi {
 
         if let Some(keys) = &self.unload_keys {
             if Self::combo_down(io, keys)
-                && now.duration_since(self.last_unload_time) > std::time::Duration::from_millis(500)
+                && now.duration_since(self.last_unload_time) > Duration::from_millis(500)
             {
                 self.last_unload_time = now;
                 debug_log!("[ignite_overlay] Unload shortcut pressed; ejecting overlay");
@@ -980,21 +588,23 @@ impl ImguiRenderLoop for EROverlayUi {
 
         let should_reset = self.reset_run_keys.as_ref().is_some_and(|keys| {
             Self::combo_down(io, keys)
-                && now.duration_since(self.last_reset_time) > std::time::Duration::from_millis(500)
+                && now.duration_since(self.last_reset_time) > Duration::from_millis(500)
         });
 
         if should_reset {
             self.last_reset_time = now;
-            self.reset_run_progress();
+            if let Ok(mut state) = self.state.write() {
+                state.event_flags.clear();
+            }
+            debug_log!("[ignite_overlay] Cleared local boss flag cache");
         }
 
         if let Some(keys) = &self.click_action_keys {
-            if Self::combo_down(io, keys) {
-                if now.duration_since(self.last_click_time) > std::time::Duration::from_millis(200)
-                {
-                    Self::simulate_mouse_click(imgui);
-                    self.last_click_time = now;
-                }
+            if Self::combo_down(io, keys)
+                && now.duration_since(self.last_click_time) > Duration::from_millis(200)
+            {
+                Self::simulate_mouse_click(imgui);
+                self.last_click_time = now;
             }
         }
     }
@@ -1029,7 +639,6 @@ impl ImguiRenderLoop for EROverlayUi {
 
             let w = screen_w * w_ratio;
             let h = screen_h * h_ratio;
-
             let x = if x_off < 0.0 {
                 screen_w - w + x_off
             } else {
@@ -1055,7 +664,7 @@ impl ImguiRenderLoop for EROverlayUi {
                 .build(|| {
                     if let Some(err) = &self.config_error {
                         let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
-                        ui.text("⚠ Failed to load config:");
+                        ui.text("Failed to load config:");
                         ui.text_wrapped(err);
                         return;
                     }
@@ -1070,7 +679,6 @@ impl ImguiRenderLoop for EROverlayUi {
                 .unwrap_or(DEFAULT_PANEL_POS);
 
             let (closed_w, closed_h) = self.measure_closed_size(ui);
-
             let x = if x_off < 0.0 {
                 screen_w - closed_w + x_off
             } else {
@@ -1093,7 +701,7 @@ impl ImguiRenderLoop for EROverlayUi {
                 .build(|| {
                     if let Some(err) = &self.config_error {
                         let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.2, 0.2, 1.0]);
-                        ui.text("⚠ Failed to load config:");
+                        ui.text("Failed to load config:");
                         ui.text_wrapped(err);
                         return;
                     }
@@ -1107,9 +715,11 @@ impl Drop for EROverlayUi {
     fn drop(&mut self) {
         self.monitor_stop
             .store(true, std::sync::atomic::Ordering::SeqCst);
-
-        std::thread::sleep(std::time::Duration::from_millis(150));
-
-        debug_log!("[ignite_overlay] 🔻 Teardown: monitor thread stop signal sent.");
+        thread_sleep_150ms();
+        debug_log!("[ignite_overlay] Teardown: monitor thread stop signal sent.");
     }
+}
+
+fn thread_sleep_150ms() {
+    std::thread::sleep(Duration::from_millis(150));
 }

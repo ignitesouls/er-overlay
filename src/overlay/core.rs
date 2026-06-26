@@ -4,10 +4,8 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-use std::path::PathBuf;
 
 use crate::{
     debug_log,
@@ -18,111 +16,406 @@ use crate::{
         },
         gamedata::{read_death_count, read_in_game_time, try_resolve_gamedataman},
         inventory::get_key_item_quantity,
-        item_spawn::request_weapon_grant,
-        stats::{RegionStatProfile, try_apply_region_stats},
     },
-    overlay::data::{
-        BossRegions, PersistedRunState, PhaseActionSet, RegionSchedule, RegionStatProfiles,
-        SharedState, save_run_state,
-    },
+    overlay::data::{EventFlagRule, EventFlagSchedule, SharedState},
 };
 
-fn active_phase_index(schedule: &RegionSchedule, igt_seconds: u32) -> Option<usize> {
-    let mut start = 0u32;
+#[derive(Clone, Default)]
+struct EventFlagRuleState {
+    last_apply_tick: u32,
+    pending_remove_at: Option<u32>,
+    active: bool,
+    active_set_flags_on: Vec<i32>,
+    active_set_flags_off: Vec<i32>,
+    previous_flag_states: Vec<(i32, bool)>,
+}
 
-    for (idx, phase) in schedule.phases.iter().enumerate() {
-        let end = start + (phase.duration_minutes as u32) * 60;
-        if igt_seconds >= start && igt_seconds < end {
-            return Some(idx);
+struct SimpleRng {
+    state: u64,
+}
+
+impl SimpleRng {
+    fn new() -> Self {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_nanos() as u64)
+            .unwrap_or(0x9e37_79b9_7f4a_7c15);
+
+        Self {
+            state: seed ^ 0xa076_1d64_78bd_642f,
         }
-        start = end;
     }
 
-    None
-}
+    fn next_u32(&mut self) -> u32 {
+        self.state ^= self.state << 13;
+        self.state ^= self.state >> 7;
+        self.state ^= self.state << 17;
+        (self.state >> 32) as u32
+    }
 
-fn boss_region_for_flag<'a>(boss_regions: &'a BossRegions, flag_id: i32) -> Option<&'a str> {
-    for group in boss_regions.iter() {
-        if group.bosses.iter().any(|boss| boss.flag_id == flag_id) {
-            return Some(group.region_name.as_str());
+    fn range_inclusive(&mut self, min: usize, max: usize) -> usize {
+        if max <= min {
+            return min;
         }
+
+        min + (self.next_u32() as usize % (max - min + 1))
     }
-    None
 }
 
-fn active_region_name_for_phase<'a>(
-    schedule: &'a RegionSchedule,
-    phase_index: Option<usize>,
-) -> Option<&'a str> {
-    phase_index.map(|idx| schedule.phases[idx].region_name.as_str())
+fn reset_event_flag_rule_states(states: &mut [EventFlagRuleState]) {
+    for state in states {
+        state.last_apply_tick = 0;
+        state.pending_remove_at = None;
+        state.active = false;
+        state.active_set_flags_on.clear();
+        state.active_set_flags_off.clear();
+        state.previous_flag_states.clear();
+        state.previous_flag_states.clear();
+    }
 }
 
-unsafe fn set_event_flag(evtflagman: *const u8, flag_id: i32, enabled: bool) -> bool {
-    if evtflagman.is_null() {
-        debug_log!(
-            "[ignite_overlay] set_event_flag aborted: evtflagman null for flag_id={}, enabled={}",
-            flag_id,
-            enabled
-        );
-        return false;
+fn current_rule_tick(rule: &EventFlagRule, current_igt_seconds: u32) -> u32 {
+    let interval_seconds = rule.interval_minutes.saturating_mul(60);
+    if interval_seconds == 0 {
+        return 0;
     }
 
-    unsafe { write_flag(evtflagman, flag_id, enabled) }
+    let start_after = rule.start_after_seconds.unwrap_or(0);
+    if current_igt_seconds < start_after.saturating_add(interval_seconds) {
+        return 0;
+    }
+
+    current_igt_seconds.saturating_sub(start_after) / interval_seconds
 }
 
-unsafe fn apply_action_set(
-    evtflagman: *const u8,
-    actions: Option<&PhaseActionSet>,
-    enable_mode: bool,
+fn seed_event_flag_rule_states(
+    rules: &[EventFlagRule],
+    states: &mut [EventFlagRuleState],
+    current_igt_seconds: u32,
 ) {
-    let Some(actions) = actions else {
+    for (rule, state) in rules.iter().zip(states.iter_mut()) {
+        state.last_apply_tick = current_rule_tick(rule, current_igt_seconds);
+        state.pending_remove_at = None;
+        state.active = false;
+        state.active_set_flags_on.clear();
+        state.active_set_flags_off.clear();
+        state.previous_flag_states.clear();
+    }
+}
+
+fn current_rule_interval_start(rule: &EventFlagRule, current_igt_seconds: u32) -> Option<u32> {
+    let tick = current_rule_tick(rule, current_igt_seconds);
+    if tick == 0 {
+        return None;
+    }
+
+    let start_after = rule.start_after_seconds.unwrap_or(0);
+    let interval_seconds = rule.interval_minutes.saturating_mul(60);
+    Some(start_after.saturating_add(tick.saturating_mul(interval_seconds)))
+}
+
+unsafe fn read_event_flag(evtflagman: *const u8, flag_id: i32) -> Option<bool> {
+    let cache = unsafe { build_cache(evtflagman, &vec![flag_id]) };
+    cache
+        .get(&flag_id)
+        .map(|loc| unsafe { read_from_flag_location(loc) })
+}
+
+unsafe fn restore_active_rule_from_current_flags(
+    evtflagman: *const u8,
+    rule: &EventFlagRule,
+    state: &mut EventFlagRuleState,
+    current_igt_seconds: u32,
+) {
+    let Some(remove_after_seconds) = rule.remove_after_seconds.filter(|seconds| *seconds > 0)
+    else {
         return;
     };
 
-    debug_log!(
-        "[ignite_overlay] apply_action_set enable_mode={} on={:?} off={:?}",
-        enable_mode,
-        actions.set_flags_on,
-        actions.set_flags_off
-    );
+    let Some(interval_start) = current_rule_interval_start(rule, current_igt_seconds) else {
+        return;
+    };
 
-    if enable_mode {
-        for &flag_id in &actions.set_flags_on {
-            let _ = unsafe { set_event_flag(evtflagman, flag_id, true) };
-        }
-        for &flag_id in &actions.set_flags_off {
-            let _ = unsafe { set_event_flag(evtflagman, flag_id, false) };
-        }
-    } else {
-        for &flag_id in &actions.set_flags_on {
-            let _ = unsafe { set_event_flag(evtflagman, flag_id, false) };
-        }
-        for &flag_id in &actions.set_flags_off {
-            let _ = unsafe { set_event_flag(evtflagman, flag_id, true) };
+    let remove_at = interval_start.saturating_add(remove_after_seconds);
+    if current_igt_seconds >= remove_at {
+        return;
+    }
+
+    let active_set_flags_on = rule
+        .set_flags_on
+        .iter()
+        .copied()
+        .filter(|&flag_id| unsafe { read_event_flag(evtflagman, flag_id) }.unwrap_or(false))
+        .collect::<Vec<_>>();
+
+    let active_set_flags_off = rule
+        .set_flags_off
+        .iter()
+        .copied()
+        .filter(|&flag_id| !unsafe { read_event_flag(evtflagman, flag_id) }.unwrap_or(true))
+        .collect::<Vec<_>>();
+
+    if active_set_flags_on.is_empty() && active_set_flags_off.is_empty() {
+        return;
+    }
+
+    state.active = true;
+    state.pending_remove_at = Some(remove_at);
+    state.previous_flag_states = active_set_flags_on
+        .iter()
+        .map(|&flag_id| (flag_id, false))
+        .chain(active_set_flags_off.iter().map(|&flag_id| (flag_id, true)))
+        .collect();
+    state.active_set_flags_on = active_set_flags_on;
+    state.active_set_flags_off = active_set_flags_off;
+
+    debug_log!(
+        "[ignite_overlay] Restored active event flag rule '{}' from current flags at IGT {} remove_at {}",
+        rule.name.as_deref().unwrap_or("unnamed"),
+        current_igt_seconds,
+        remove_at
+    );
+}
+
+fn flag_list_text(flags: &[i32]) -> String {
+    flags
+        .iter()
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn labeled_flag_list_text(rule: &EventFlagRule, flags: &[i32]) -> String {
+    flags
+        .iter()
+        .map(|id| {
+            rule.flag_labels
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| id.to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn rule_display_name(rule: &EventFlagRule, state: &EventFlagRuleState) -> String {
+    let mut labels = Vec::new();
+
+    if !state.active_set_flags_on.is_empty() {
+        labels.push(labeled_flag_list_text(rule, &state.active_set_flags_on));
+    }
+    if !state.active_set_flags_off.is_empty() {
+        labels.push(labeled_flag_list_text(rule, &state.active_set_flags_off));
+    }
+
+    labels
+        .into_iter()
+        .filter(|label| !label.is_empty())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn select_random_flags(flags: &[i32], rule: &EventFlagRule, rng: &mut SimpleRng) -> Vec<i32> {
+    if flags.is_empty() {
+        return Vec::new();
+    }
+
+    let min = rule.random_min_flags.unwrap_or(1).clamp(0, flags.len());
+    let max = rule
+        .random_max_flags
+        .unwrap_or(flags.len())
+        .clamp(min, flags.len());
+    let count = rng.range_inclusive(min, max);
+
+    let mut shuffled = flags.to_vec();
+    for idx in (1..shuffled.len()).rev() {
+        let swap_idx = rng.range_inclusive(0, idx);
+        shuffled.swap(idx, swap_idx);
+    }
+
+    shuffled.truncate(count);
+    shuffled
+}
+
+fn selected_rule_flags(rule: &EventFlagRule, rng: &mut SimpleRng) -> (Vec<i32>, Vec<i32>) {
+    if !rule.randomize_flags {
+        return (rule.set_flags_on.clone(), rule.set_flags_off.clone());
+    }
+
+    (
+        select_random_flags(&rule.set_flags_on, rule, rng),
+        select_random_flags(&rule.set_flags_off, rule, rng),
+    )
+}
+
+unsafe fn apply_event_flags(
+    evtflagman: *const u8,
+    set_flags_on: &[i32],
+    set_flags_off: &[i32],
+    active: bool,
+) {
+    for &flag_id in set_flags_on {
+        let _ = unsafe { write_flag(evtflagman, flag_id, active) };
+    }
+
+    for &flag_id in set_flags_off {
+        let _ = unsafe { write_flag(evtflagman, flag_id, !active) };
+    }
+}
+
+unsafe fn capture_flag_states(evtflagman: *const u8, flags: &[i32]) -> Vec<(i32, bool)> {
+    let mut unique_flags = Vec::new();
+    for &flag_id in flags {
+        if !unique_flags.contains(&flag_id) {
+            unique_flags.push(flag_id);
         }
     }
+
+    let cache = unsafe { build_cache(evtflagman, &unique_flags) };
+    unique_flags
+        .into_iter()
+        .filter_map(|flag_id| {
+            cache
+                .get(&flag_id)
+                .map(|loc| (flag_id, unsafe { read_from_flag_location(loc) }))
+        })
+        .collect()
+}
+
+unsafe fn restore_flag_states(evtflagman: *const u8, previous_states: &[(i32, bool)]) {
+    for &(flag_id, was_enabled) in previous_states {
+        let _ = unsafe { write_flag(evtflagman, flag_id, was_enabled) };
+    }
+}
+
+unsafe fn apply_always_on_flags(evtflagman: *const u8, flags: &[i32]) {
+    for &flag_id in flags {
+        let _ = unsafe { write_flag(evtflagman, flag_id, true) };
+    }
+}
+
+fn active_event_flag_text(
+    always_on_flags: &[i32],
+    always_on_applied: bool,
+    rules: &[EventFlagRule],
+    states: &[EventFlagRuleState],
+) -> String {
+    let mut names = Vec::new();
+
+    if always_on_applied && !always_on_flags.is_empty() {
+        names.push(format!("Always On: {}", flag_list_text(always_on_flags)));
+    }
+
+    names.extend(
+        rules
+            .iter()
+            .zip(states.iter())
+            .filter(|(_, state)| state.active)
+            .map(|(rule, state)| rule_display_name(rule, state))
+            .filter(|name| !name.is_empty()),
+    );
+
+    names.join(", ")
+}
+
+unsafe fn update_event_flag_rules(
+    evtflagman: *const u8,
+    rules: &[EventFlagRule],
+    states: &mut [EventFlagRuleState],
+    current_igt_seconds: u32,
+    always_on_flags: &[i32],
+    always_on_applied: bool,
+    rng: &mut SimpleRng,
+) -> String {
+    for (rule, state) in rules.iter().zip(states.iter_mut()) {
+        if let Some(remove_at) = state.pending_remove_at {
+            if current_igt_seconds >= remove_at {
+                unsafe {
+                    apply_event_flags(
+                        evtflagman,
+                        &state.active_set_flags_on,
+                        &state.active_set_flags_off,
+                        false,
+                    )
+                };
+                state.pending_remove_at = None;
+                state.active = false;
+                state.active_set_flags_on.clear();
+                state.active_set_flags_off.clear();
+                state.previous_flag_states.clear();
+                state.previous_flag_states.clear();
+
+                debug_log!(
+                    "[ignite_overlay] Removed event flag rule '{}' at IGT {}",
+                    rule.name.as_deref().unwrap_or("unnamed"),
+                    current_igt_seconds
+                );
+            }
+        }
+
+        if rule.interval_minutes == 0
+            || (rule.set_flags_on.is_empty() && rule.set_flags_off.is_empty())
+        {
+            continue;
+        }
+
+        let tick = current_rule_tick(rule, current_igt_seconds);
+        if tick <= state.last_apply_tick {
+            continue;
+        }
+
+        let (set_flags_on, set_flags_off) = selected_rule_flags(rule, rng);
+        if set_flags_on.is_empty() && set_flags_off.is_empty() {
+            state.last_apply_tick = tick;
+            continue;
+        }
+
+        if state.active {
+            unsafe { restore_flag_states(evtflagman, &state.previous_flag_states) };
+            state.pending_remove_at = None;
+            state.active = false;
+            state.active_set_flags_on.clear();
+            state.active_set_flags_off.clear();
+            state.previous_flag_states.clear();
+        }
+
+        let mut touched_flags = set_flags_on.clone();
+        touched_flags.extend(set_flags_off.iter().copied());
+        state.previous_flag_states = unsafe { capture_flag_states(evtflagman, &touched_flags) };
+
+        unsafe { apply_event_flags(evtflagman, &set_flags_on, &set_flags_off, true) };
+        state.last_apply_tick = tick;
+        state.active = true;
+        state.active_set_flags_on = set_flags_on;
+        state.active_set_flags_off = set_flags_off;
+
+        if let Some(remove_after_seconds) = rule.remove_after_seconds.filter(|seconds| *seconds > 0)
+        {
+            state.pending_remove_at =
+                Some(current_igt_seconds.saturating_add(remove_after_seconds));
+        }
+
+        debug_log!(
+            "[ignite_overlay] Applied event flag rule '{}' at IGT {} tick {}",
+            rule.name.as_deref().unwrap_or("unnamed"),
+            current_igt_seconds,
+            tick
+        );
+    }
+
+    active_event_flag_text(always_on_flags, always_on_applied, rules, states)
 }
 
 pub fn start_game_monitor(
     state: SharedState,
     igt: Arc<RwLock<u32>>,
-    boss_regions: BossRegions,
-    schedule: RegionSchedule,
-    stat_profiles: Option<RegionStatProfiles>,
-    route_actions_enabled: bool,
-    stat_profiles_enabled: bool,
-    item_spawns_enabled: bool,
+    flag_ids: Vec<i32>,
+    event_flags_enabled: bool,
+    event_flag_schedule: Option<EventFlagSchedule>,
     key_item_id: i32,
     poll_ms: u64,
     stop: Arc<AtomicBool>,
-    save_dir: PathBuf,
-    seed_id: String,
 ) {
-    let flag_ids: Vec<i32> = boss_regions
-        .iter()
-        .flat_map(|region| region.bosses.iter().map(|boss| boss.flag_id))
-        .collect();
-
     let great_rune_flags = vec![181, 182, 183, 184, 185, 186, 187];
 
     thread::spawn(move || unsafe {
@@ -147,6 +440,7 @@ pub fn start_game_monitor(
                     );
                     break;
                 }
+
                 attempts += 1;
                 if attempts == 1 || attempts % 10 == 0 {
                     debug_log!(
@@ -156,6 +450,7 @@ pub fn start_game_monitor(
                         attempts
                     );
                 }
+
                 if delay < 2000 {
                     delay *= 2;
                 }
@@ -165,7 +460,7 @@ pub fn start_game_monitor(
 
         let mut entry_size = read_entry_size(evtflagman);
         while entry_size == 0 && !stop.load(Ordering::SeqCst) {
-            debug_log!("[ignite_overlay] EventFlagMan not ready — waiting...");
+            debug_log!("[ignite_overlay] EventFlagMan not ready - waiting...");
             thread::sleep(Duration::from_millis(500));
             entry_size = read_entry_size(evtflagman);
         }
@@ -181,12 +476,21 @@ pub fn start_game_monitor(
         let mut rune_cache = build_cache(evtflagman, &great_rune_flags);
 
         let update_interval = Duration::from_millis(poll_ms);
+        let event_flag_schedule = event_flag_schedule.unwrap_or_default();
+        let always_on_flags = event_flag_schedule.always_on_flags;
+        let event_flag_rules = event_flag_schedule.interval_rules;
+        let mut event_flag_rule_states =
+            vec![EventFlagRuleState::default(); event_flag_rules.len()];
+        let mut last_event_igt_seconds = 0u32;
+        let mut event_flag_rules_seeded = false;
+        let mut always_on_flags_applied = false;
+        let mut rng = SimpleRng::new();
 
         while !stop.load(Ordering::SeqCst) {
             thread::sleep(update_interval);
 
             if evtflagman.is_null() || gamedataman.is_null() {
-                debug_log!("[ignite_overlay] Managers lost — attempting reattach...");
+                debug_log!("[ignite_overlay] Managers lost - attempting reattach...");
                 evtflagman = std::ptr::null();
                 gamedataman = std::ptr::null();
 
@@ -212,8 +516,7 @@ pub fn start_game_monitor(
             }
 
             let cur_root = read_root(evtflagman);
-            let boss_cache_needs_rebuild = !flag_ids.is_empty() && boss_cache.is_empty();
-            if cur_root != last_root || boss_cache_needs_rebuild || rune_cache.is_empty() {
+            if cur_root != last_root || boss_cache.is_empty() || rune_cache.is_empty() {
                 let new_boss_cache = build_cache(evtflagman, &flag_ids);
                 let new_rune_cache = build_cache(evtflagman, &great_rune_flags);
                 let confirm_root = read_root(evtflagman);
@@ -231,91 +534,18 @@ pub fn start_game_monitor(
                 continue;
             }
 
-            let mut current_igt = {
-                let r = igt.read().unwrap();
-                *r
-            };
-
-            if let Some(new_igt_raw) = read_in_game_time(gamedataman) {
-                let new_igt = new_igt_raw / 1000;
-                current_igt = new_igt;
-                let mut w = igt.write().unwrap();
-                *w = new_igt;
-
-                debug_log!(
-                    "[ignite_overlay] raw_igt={} stored_seconds={}",
-                    new_igt_raw,
-                    new_igt
-                );
-            }
-
-            let was_initialized = {
-                let reader = state.read().unwrap();
-                reader.initialized
-            };
-
-            let now_initialized = current_igt > 0;
-
-            if now_initialized && !was_initialized {
-                debug_log!("[ignite_overlay] Run initialized at IGT {}", current_igt);
-            }
-
-            let (
-                mut prev_flags,
-                prev_qty,
-                prev_death_count,
-                prev_runes,
-                prev_phase_index,
-                prev_region_name,
-                prev_counted_kills,
-                prev_counted_total,
-                mut boss_first_kill_time,
-                mut fired_enter_once,
-                mut counted_flags,
-                mut cumulative_counted_kills,
-            ) = {
+            let (mut prev_flags, prev_qty, prev_death_count, prev_runes, prev_events) = {
                 let reader = state.read().unwrap();
                 (
                     reader.event_flags.clone(),
                     reader.key_item_quantity,
                     reader.death_count,
                     reader.great_runes,
-                    if reader.initialized {
-                        reader.active_phase_index
-                    } else {
-                        None
-                    },
-                    if reader.initialized {
-                        reader.active_region_name.clone()
-                    } else {
-                        String::new()
-                    },
-                    if reader.initialized {
-                        reader.counted_kills
-                    } else {
-                        0
-                    },
-                    if reader.initialized {
-                        reader.counted_total
-                    } else {
-                        0
-                    },
-                    reader.boss_first_kill_time.clone(),
-                    reader.fired_enter_once.clone(),
-                    reader.counted_flags.clone(),
-                    reader.cumulative_counted_kills,
+                    reader.current_events.clone(),
                 )
             };
 
             let mut changed = false;
-
-            if !now_initialized && was_initialized {
-                fired_enter_once.clear();
-                debug_log!(
-                    "[ignite_overlay] Run became uninitialized; cleared phase enter-once actions"
-                );
-                changed = true;
-            }
 
             for (&flag_id, loc) in &boss_cache {
                 if loc.base.is_null() {
@@ -326,75 +556,10 @@ pub fn start_game_monitor(
                 match prev_flags.get(&flag_id) {
                     Some(&old) if old != flag_state => {
                         prev_flags.insert(flag_id, flag_state);
-
-                        if !old && flag_state {
-                            boss_first_kill_time.entry(flag_id).or_insert(current_igt);
-
-                            let current_phase = if now_initialized {
-                                active_phase_index(&schedule, current_igt)
-                            } else {
-                                None
-                            };
-
-                            let active_region =
-                                active_region_name_for_phase(&schedule, current_phase);
-                            let boss_region = boss_region_for_flag(&boss_regions, flag_id);
-
-                            if let (Some(active_region), Some(boss_region)) =
-                                (active_region, boss_region)
-                            {
-                                if boss_region.eq_ignore_ascii_case(active_region)
-                                    && !counted_flags.contains(&flag_id)
-                                {
-                                    counted_flags.insert(flag_id);
-                                    cumulative_counted_kills += 1;
-
-                                    let persisted = PersistedRunState {
-                                        seed: seed_id.clone(),
-                                        counted_flags: counted_flags.clone(),
-                                        cumulative_counted_kills,
-                                    };
-
-                                    let _ = save_run_state(&save_dir, &persisted);
-
-                                    debug_log!(
-                                        "[ignite_overlay] Counted boss kill: flag {} boss_region='{}' active_region='{}' cumulative={}",
-                                        flag_id,
-                                        boss_region,
-                                        active_region,
-                                        cumulative_counted_kills
-                                    );
-                                } else {
-                                    debug_log!(
-                                        "[ignite_overlay] Ignored boss kill: flag {} boss_region='{}' active_region='{}'",
-                                        flag_id,
-                                        boss_region,
-                                        active_region
-                                    );
-                                }
-                            } else {
-                                debug_log!(
-                                    "[ignite_overlay] Ignored boss kill: flag {} could not resolve active region or boss region",
-                                    flag_id
-                                );
-                            }
-
-                            debug_log!(
-                                "[ignite_overlay] Boss kill detected: flag {} at IGT {}",
-                                flag_id,
-                                current_igt
-                            );
-                        }
-
                         changed = true;
                     }
                     None => {
                         prev_flags.insert(flag_id, flag_state);
-
-                        if flag_state {
-                            boss_first_kill_time.entry(flag_id).or_insert(current_igt);
-                        }
-
                         changed = true;
                     }
                     _ => {}
@@ -438,218 +603,88 @@ pub fn start_game_monitor(
                 }
             }
 
-            let new_phase_index = if now_initialized {
-                active_phase_index(&schedule, current_igt)
-            } else {
-                None
-            };
-
-            let mut new_region_name = String::new();
-            let mut new_counted_total = 0u32;
-            let new_counted_kills = cumulative_counted_kills;
-
-            if let Some(phase_idx) = new_phase_index {
-                let phase = &schedule.phases[phase_idx];
-                new_region_name = phase.region_name.clone();
-
-                if let Some(group) = boss_regions
-                    .iter()
-                    .find(|g| g.region_name.eq_ignore_ascii_case(&phase.region_name))
-                {
-                    new_counted_total = group.bosses.len() as u32;
-                }
+            let mut current_igt_seconds = last_event_igt_seconds;
+            if let Some(new_igt_ms) = read_in_game_time(gamedataman) {
+                current_igt_seconds = new_igt_ms / 1000;
             }
 
-            let region_changed = now_initialized
-                && (new_phase_index != prev_phase_index || new_region_name != prev_region_name);
+            if current_igt_seconds < last_event_igt_seconds {
+                reset_event_flag_rule_states(&mut event_flag_rule_states);
+                event_flag_rules_seeded = false;
+                always_on_flags_applied = false;
+            }
 
-            let first_init_apply =
-                now_initialized && !was_initialized && !new_region_name.is_empty();
+            if event_flags_enabled && current_igt_seconds > 0 && !event_flag_rules_seeded {
+                seed_event_flag_rule_states(
+                    &event_flag_rules,
+                    &mut event_flag_rule_states,
+                    current_igt_seconds,
+                );
+                for (rule, state) in event_flag_rules
+                    .iter()
+                    .zip(event_flag_rule_states.iter_mut())
+                {
+                    restore_active_rule_from_current_flags(
+                        evtflagman,
+                        rule,
+                        state,
+                        current_igt_seconds,
+                    );
+                }
 
-            if now_initialized != was_initialized
-                || new_phase_index != prev_phase_index
-                || new_region_name != prev_region_name
-                || new_counted_kills != prev_counted_kills
-                || new_counted_total != prev_counted_total
-            {
+                event_flag_rules_seeded = true;
+                debug_log!(
+                    "[ignite_overlay] Seeded event flag intervals at IGT {}",
+                    current_igt_seconds
+                );
+            }
+
+            last_event_igt_seconds = current_igt_seconds;
+
+            let mut new_current_events = prev_events.clone();
+            if event_flags_enabled && current_igt_seconds > 0 {
+                if !always_on_flags_applied && !always_on_flags.is_empty() {
+                    apply_always_on_flags(evtflagman, &always_on_flags);
+                    always_on_flags_applied = true;
+                    debug_log!(
+                        "[ignite_overlay] Applied always-on event flags: {}",
+                        flag_list_text(&always_on_flags)
+                    );
+                }
+
+                new_current_events = update_event_flag_rules(
+                    evtflagman,
+                    &event_flag_rules,
+                    &mut event_flag_rule_states,
+                    current_igt_seconds,
+                    &always_on_flags,
+                    always_on_flags_applied,
+                    &mut rng,
+                );
+            }
+
+            if new_current_events != prev_events {
                 changed = true;
             }
 
-            if new_phase_index != prev_phase_index {
-                debug_log!(
-                    "[ignite_overlay] Phase change: {:?} -> {:?}",
-                    prev_phase_index,
-                    new_phase_index
-                );
-
-                if let Some(old_idx) = prev_phase_index {
-                    let old_phase = &schedule.phases[old_idx];
-                    if route_actions_enabled {
-                        apply_action_set(evtflagman, old_phase.on_exit.as_ref(), true);
-                        apply_action_set(evtflagman, old_phase.while_active.as_ref(), false);
-                    }
-                }
-
-                if let Some(new_idx) = new_phase_index {
-                    let new_phase = &schedule.phases[new_idx];
-
-                    if !fired_enter_once.contains(&new_idx) {
-                        if route_actions_enabled {
-                            apply_action_set(evtflagman, new_phase.on_enter_once.as_ref(), true);
-                        }
-
-                        if item_spawns_enabled {
-                            if let Some(actions) = new_phase.on_enter_once.as_ref() {
-                                for &weapon_id in &actions.spawn_weapons {
-                                    request_weapon_grant(weapon_id, 1);
-                                }
-                            }
-                        }
-
-                        fired_enter_once.insert(new_idx);
-                    }
-
-                    if route_actions_enabled {
-                        apply_action_set(evtflagman, new_phase.while_active.as_ref(), true);
-                    }
-                }
-            }
-
-            if stat_profiles_enabled && (region_changed || first_init_apply) {
-                if let Some(profile) = stat_profiles
-                    .as_ref()
-                    .and_then(|profiles| region_stat_profile(profiles, &new_region_name))
-                {
-                    match try_apply_region_stats(*profile) {
-                        Ok(()) => {
-                            debug_log!(
-                                "[ignite_overlay] Applied region stat profile for '{}'",
-                                new_region_name
-                            );
-                        }
-                        Err(err) => {
-                            debug_log!(
-                                "[ignite_overlay] Failed to apply region stat profile for '{}': {}",
-                                new_region_name,
-                                err
-                            );
-                        }
-                    }
-                } else if !new_region_name.is_empty() {
-                    debug_log!(
-                        "[ignite_overlay] No region stat profile configured for '{}'",
-                        new_region_name
-                    );
-                }
-            }
-
-            debug_log!(
-                "[ignite_overlay] phase={:?} region='{}' kills={}/{} initialized={}",
-                new_phase_index,
-                new_region_name,
-                new_counted_kills,
-                new_counted_total,
-                now_initialized
-            );
-
             if changed {
                 debug_log!(
-                    "[ignite_overlay] Change detected during monitoring. Updating app state."
+                    "[ignite_overlay] Change detected during game monitoring. Updating app state."
                 );
                 let mut w = state.write().unwrap();
                 w.event_flags = prev_flags;
                 w.key_item_quantity = new_qty;
                 w.death_count = new_death_count;
                 w.great_runes = new_runes;
+                w.current_events = new_current_events;
+            }
 
-                w.initialized = now_initialized;
-                w.active_phase_index = new_phase_index;
-                w.active_region_name = new_region_name;
-                w.counted_kills = new_counted_kills;
-                w.counted_total = new_counted_total;
-
-                w.counted_flags = counted_flags;
-                w.cumulative_counted_kills = cumulative_counted_kills;
-
-                w.boss_first_kill_time = boss_first_kill_time;
-                w.fired_enter_once = fired_enter_once;
+            if let Some(new_igt_ms) = read_in_game_time(gamedataman) {
+                let mut w = igt.write().unwrap();
+                *w = new_igt_ms;
             }
         }
 
         debug_log!("[ignite_overlay] Monitor thread exiting gracefully");
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::er::stats::RegionStatProfile;
-    use std::collections::HashMap;
-
-    fn phase(
-        name: &str,
-        region_name: &str,
-        duration_minutes: u64,
-    ) -> crate::overlay::data::SchedulePhase {
-        crate::overlay::data::SchedulePhase {
-            name: name.to_string(),
-            region_name: region_name.to_string(),
-            duration_minutes,
-            on_enter_once: None,
-            while_active: None,
-            on_exit: None,
-        }
-    }
-
-    #[test]
-    fn active_phase_uses_cumulative_phase_durations() {
-        let schedule = RegionSchedule {
-            schedule_name: "test".to_string(),
-            count_mode: "strict".to_string(),
-            time_basis: "igt".to_string(),
-            phases: vec![
-                phase("one", "Limgrave", 10),
-                phase("two", "Liurnia of the Lakes", 5),
-            ],
-        };
-
-        assert_eq!(active_phase_index(&schedule, 0), Some(0));
-        assert_eq!(active_phase_index(&schedule, 599), Some(0));
-        assert_eq!(active_phase_index(&schedule, 600), Some(1));
-        assert_eq!(active_phase_index(&schedule, 899), Some(1));
-        assert_eq!(active_phase_index(&schedule, 900), None);
-    }
-
-    #[test]
-    fn region_stat_profile_lookup_is_case_insensitive() {
-        let mut profiles = HashMap::new();
-        profiles.insert(
-            "Limgrave".to_string(),
-            RegionStatProfile {
-                vigor: 30,
-                mind: 10,
-                endurance: 15,
-                strength: 10,
-                dexterity: 10,
-                intelligence: 10,
-                faith: 10,
-                arcane: 10,
-            },
-        );
-
-        let profile = region_stat_profile(&profiles, "limgrave").unwrap();
-
-        assert_eq!(profile.vigor, 30);
-    }
-}
-
-fn region_stat_profile<'a>(
-    profiles: &'a RegionStatProfiles,
-    region_name: &str,
-) -> Option<&'a RegionStatProfile> {
-    profiles.get(region_name).or_else(|| {
-        profiles
-            .iter()
-            .find_map(|(name, profile)| name.eq_ignore_ascii_case(region_name).then_some(profile))
-    })
 }

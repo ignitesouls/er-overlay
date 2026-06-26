@@ -7,7 +7,8 @@ use std::fs;
 
 pub const DEFAULT_PANEL_DIM: [f32; 2] = [0.17, 0.92];
 pub const DEFAULT_PANEL_POS: [f32; 2] = [-10.0, 10.0];
-pub const DEFAULT_DISPLAY_TEXT: &str = "Current: {kills}/{total}$nIGT: {igt}$nDeaths: {deaths}";
+pub const DEFAULT_DISPLAY_TEXT: &str =
+    "Time: {igt}$nBosses: {kills}/{total}$nDeaths: {deaths}$nSpecial Effects: {current_events}";
 
 #[derive(Debug, Deserialize)]
 pub struct Common {
@@ -51,17 +52,13 @@ pub struct Style {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Boss {
     pub data_file: Option<String>,
-    pub schedule_file: Option<String>,
-    pub profile_file: Option<String>,
-    pub seed: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct Features {
     pub overlay: Option<bool>,
     pub boss_tracking: Option<bool>,
-    pub route_actions: Option<bool>,
-    pub stat_profiles: Option<bool>,
+    pub interval_event_flags: Option<bool>,
     pub auto_grace: Option<bool>,
     pub experimental_item_spawn: Option<bool>,
 }
@@ -69,6 +66,11 @@ pub struct Features {
 #[derive(Debug, Deserialize)]
 pub struct Experimental {
     pub test_weapon_id: Option<i32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EventFlags {
+    pub file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +102,7 @@ pub struct IgniteConfig {
     pub boss: Option<Boss>,
     pub features: Option<Features>,
     pub experimental: Option<Experimental>,
+    pub event_flags: Option<EventFlags>,
     pub overlay: Option<Overlay>,
     pub timer: Option<TimerConfig>,
 }
@@ -119,17 +122,10 @@ impl IgniteConfig {
             .unwrap_or(true)
     }
 
-    pub fn route_actions_enabled(&self) -> bool {
+    pub fn interval_event_flags_enabled(&self) -> bool {
         self.features
             .as_ref()
-            .and_then(|f| f.route_actions)
-            .unwrap_or(false)
-    }
-
-    pub fn stat_profiles_enabled(&self) -> bool {
-        self.features
-            .as_ref()
-            .and_then(|f| f.stat_profiles)
+            .and_then(|f| f.interval_event_flags)
             .unwrap_or(false)
     }
 
@@ -209,11 +205,11 @@ pub fn apply_style_config(imgui: &mut Context, cfg: &IgniteConfig) {
             style.frame_border_size = border_width;
         }
 
-        style.window_padding = [16.0, 14.0];
-        style.frame_padding = [10.0, 7.0];
-        style.item_spacing = [10.0, 8.0];
+        style.window_padding = [18.0, 16.0];
+        style.frame_padding = [11.0, 7.0];
+        style.item_spacing = [10.0, 7.0];
         style.item_inner_spacing = [8.0, 6.0];
-        style.scrollbar_size = 10.0;
+        style.scrollbar_size = 8.0;
     }
 }
 
@@ -525,6 +521,7 @@ mod tests {
             boss: None,
             features: None,
             experimental: None,
+            event_flags: None,
             overlay: None,
             timer: None,
         }
@@ -542,8 +539,7 @@ mod tests {
     fn feature_defaults_keep_memory_mutation_disabled() {
         let cfg = empty_config();
 
-        assert!(!cfg.route_actions_enabled());
-        assert!(!cfg.stat_profiles_enabled());
+        assert!(!cfg.interval_event_flags_enabled());
         assert!(!cfg.auto_grace_enabled());
         assert!(!cfg.experimental_item_spawn_enabled());
         assert_eq!(cfg.test_weapon_id(), None);
@@ -565,7 +561,25 @@ mod tests {
         assert!(cfg.experimental_item_spawn_enabled());
         assert_eq!(cfg.test_weapon_id(), Some(15020810));
     }
+    #[test]
+    fn parses_event_flags_config() {
+        let cfg: IgniteConfig = toml::from_str(
+            r#"
+            [features]
+            interval_event_flags = true
 
+            [event_flags]
+            file = "player_event_flags.json"
+            "#,
+        )
+        .unwrap();
+
+        assert!(cfg.interval_event_flags_enabled());
+        assert_eq!(
+            cfg.event_flags.as_ref().unwrap().file.as_deref(),
+            Some("player_event_flags.json")
+        );
+    }
     #[test]
     fn parses_multi_key_combo() {
         let keys = parse_key_combo("CTRL+SHIFT+F12");

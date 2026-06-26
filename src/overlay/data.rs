@@ -1,149 +1,26 @@
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
 
 use crate::debug_log;
-use crate::er::stats::RegionStatProfile;
 
 #[derive(Default)]
 pub struct AppState {
     pub key_item_quantity: u32,
     pub event_flags: HashMap<i32, bool>,
-    pub initialized: bool,
     pub death_count: u32,
     pub great_runes: i32,
-
-    // phase / region tracking
-    pub active_phase_index: Option<usize>,
-    pub active_region_name: String,
-
-    // current displayed counters
-    pub counted_kills: u32,
-    pub counted_total: u32,
-
-    // persistent strict counting state
-    pub counted_flags: HashSet<i32>,
-    pub cumulative_counted_kills: u32,
-
-    // optional timing/debug info
-    pub boss_first_kill_time: HashMap<i32, u32>,
-
-    // prevents phase entry rewards/events from firing more than once
-    pub fired_enter_once: HashSet<usize>,
+    pub current_events: String,
 }
 
 pub type SharedState = Arc<RwLock<AppState>>;
 
 pub fn create_state() -> SharedState {
     Arc::new(RwLock::new(AppState::default()))
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct PersistedRunState {
-    pub seed: String,
-
-    #[serde(default)]
-    pub counted_flags: HashSet<i32>,
-
-    #[serde(default)]
-    pub cumulative_counted_kills: u32,
-}
-
-pub fn save_run_state(config_dir: &PathBuf, state: &PersistedRunState) -> bool {
-    let path = config_dir.join("data/run_progress.json");
-
-    if let Some(parent) = path.parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
-            debug_log!(
-                "[ignite_overlay] ❌ Failed creating progress dir '{}': {:?}",
-                parent.display(),
-                e
-            );
-            return false;
-        }
-    }
-
-    match serde_json::to_string_pretty(state) {
-        Ok(json) => match fs::write(&path, json) {
-            Ok(_) => {
-                debug_log!(
-                    "[ignite_overlay] ✅ Saved run progress to '{}'",
-                    path.display()
-                );
-                true
-            }
-            Err(e) => {
-                debug_log!(
-                    "[ignite_overlay] ❌ Failed writing run progress '{}': {:?}",
-                    path.display(),
-                    e
-                );
-                false
-            }
-        },
-        Err(e) => {
-            debug_log!(
-                "[ignite_overlay] ❌ Failed serializing run progress: {:?}",
-                e
-            );
-            false
-        }
-    }
-}
-
-pub fn load_run_state(config_dir: &PathBuf, seed: &str) -> Option<PersistedRunState> {
-    let path = config_dir.join("data/run_progress.json");
-
-    if !path.exists() {
-        debug_log!(
-            "[ignite_overlay] ℹ No run progress file found at '{}'",
-            path.display()
-        );
-        return None;
-    }
-
-    let contents = match fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) => {
-            debug_log!(
-                "[ignite_overlay] ❌ Failed reading run progress '{}': {:?}",
-                path.display(),
-                e
-            );
-            return None;
-        }
-    };
-
-    let saved = match serde_json::from_str::<PersistedRunState>(&contents) {
-        Ok(s) => s,
-        Err(e) => {
-            debug_log!(
-                "[ignite_overlay] ❌ Failed parsing run progress '{}': {:?}",
-                path.display(),
-                e
-            );
-            return None;
-        }
-    };
-
-    if saved.seed.trim() == seed.trim() {
-        debug_log!(
-            "[ignite_overlay] ✅ Loaded run progress for seed '{}'",
-            seed
-        );
-        Some(saved)
-    } else {
-        debug_log!(
-            "[ignite_overlay] ℹ Run progress seed mismatch: file='{}' current='{}' — starting fresh",
-            saved.seed,
-            seed
-        );
-        None
-    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -168,34 +45,24 @@ pub struct RegionData {
 }
 
 pub type BossRegions = Vec<RegionData>;
-pub type RegionStatProfiles = HashMap<String, RegionStatProfile>;
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct RegionSchedule {
-    pub schedule_name: String,
-    pub count_mode: String,
-    pub time_basis: String,
-    pub phases: Vec<SchedulePhase>,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-pub struct SchedulePhase {
-    pub name: String,
-    pub region_name: String,
-    pub duration_minutes: u64,
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct EventFlagSchedule {
+    #[serde(default)]
+    pub schedule_name: Option<String>,
 
     #[serde(default)]
-    pub on_enter_once: Option<PhaseActionSet>,
+    pub always_on_flags: Vec<i32>,
 
     #[serde(default)]
-    pub while_active: Option<PhaseActionSet>,
-
-    #[serde(default)]
-    pub on_exit: Option<PhaseActionSet>,
+    pub interval_rules: Vec<EventFlagRule>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
-pub struct PhaseActionSet {
+pub struct EventFlagRule {
+    #[serde(default)]
+    pub name: Option<String>,
+
     #[serde(default)]
     pub set_flags_on: Vec<i32>,
 
@@ -203,7 +70,68 @@ pub struct PhaseActionSet {
     pub set_flags_off: Vec<i32>,
 
     #[serde(default)]
-    pub spawn_weapons: Vec<i32>,
+    pub flag_labels: HashMap<i32, String>,
+
+    #[serde(default)]
+    pub randomize_flags: bool,
+
+    #[serde(default)]
+    pub random_min_flags: Option<usize>,
+
+    #[serde(default)]
+    pub random_max_flags: Option<usize>,
+
+    pub interval_minutes: u32,
+
+    #[serde(default)]
+    pub remove_after_seconds: Option<u32>,
+
+    #[serde(default)]
+    pub start_after_seconds: Option<u32>,
+}
+
+pub fn load_event_flag_schedule(
+    config_dir: &PathBuf,
+    event_flag_file: &str,
+) -> Option<EventFlagSchedule> {
+    let path = config_dir.join(format!("data/{}", event_flag_file));
+
+    if !path.exists() {
+        debug_log!(
+            "[ignite_overlay] Event flag schedule not found at '{}'",
+            path.display()
+        );
+        return None;
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<EventFlagSchedule>(&contents) {
+            Ok(data) => {
+                debug_log!(
+                    "[ignite_overlay] Loaded {} event flag interval rules from '{}'",
+                    data.interval_rules.len(),
+                    path.display()
+                );
+                Some(data)
+            }
+            Err(e) => {
+                debug_log!(
+                    "[ignite_overlay] Failed to parse event flag schedule '{}': {:?}",
+                    path.display(),
+                    e
+                );
+                None
+            }
+        },
+        Err(e) => {
+            debug_log!(
+                "[ignite_overlay] Could not read event flag schedule '{}': {:?}",
+                path.display(),
+                e
+            );
+            None
+        }
+    }
 }
 
 pub fn load_localized_boss_data(
@@ -227,7 +155,7 @@ pub fn load_localized_boss_data(
     for path in candidates {
         if !path.exists() {
             debug_log!(
-                "[ignite_overlay] ⚠ Boss data not found at '{}'",
+                "[ignite_overlay] Boss data not found at '{}'",
                 path.display()
             );
             continue;
@@ -237,14 +165,14 @@ pub fn load_localized_boss_data(
             Ok(contents) => match serde_json::from_str::<BossRegions>(&contents) {
                 Ok(data) => {
                     debug_log!(
-                        "[ignite_overlay] ✅ Loaded boss data from '{}'",
+                        "[ignite_overlay] Loaded boss data from '{}'",
                         path.display()
                     );
                     return Some(data);
                 }
                 Err(e) => {
                     debug_log!(
-                        "[ignite_overlay] ❌ Failed to parse JSON '{}': {:?}",
+                        "[ignite_overlay] Failed to parse JSON '{}': {:?}",
                         path.display(),
                         e
                     );
@@ -252,7 +180,7 @@ pub fn load_localized_boss_data(
             },
             Err(e) => {
                 debug_log!(
-                    "[ignite_overlay] ❌ Could not read '{}': {:?}",
+                    "[ignite_overlay] Could not read '{}': {:?}",
                     path.display(),
                     e
                 );
@@ -260,90 +188,6 @@ pub fn load_localized_boss_data(
         }
     }
 
-    debug_log!("[ignite_overlay] ❌ No valid boss data file found");
+    debug_log!("[ignite_overlay] No valid boss data file found");
     None
-}
-
-pub fn load_region_schedule(config_dir: &PathBuf, schedule_file: &str) -> Option<RegionSchedule> {
-    let path = config_dir.join(format!("data/{}", schedule_file));
-
-    if !path.exists() {
-        debug_log!(
-            "[ignite_overlay] ⚠ Region schedule not found at '{}'",
-            path.display()
-        );
-        return None;
-    }
-
-    match fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<RegionSchedule>(&contents) {
-            Ok(data) => {
-                debug_log!(
-                    "[ignite_overlay] ✅ Loaded region schedule from '{}'",
-                    path.display()
-                );
-                Some(data)
-            }
-            Err(e) => {
-                debug_log!(
-                    "[ignite_overlay] ❌ Failed to parse schedule JSON '{}': {:?}",
-                    path.display(),
-                    e
-                );
-                None
-            }
-        },
-        Err(e) => {
-            debug_log!(
-                "[ignite_overlay] ❌ Could not read schedule '{}': {:?}",
-                path.display(),
-                e
-            );
-            None
-        }
-    }
-}
-
-pub fn load_region_stat_profiles(
-    config_dir: &PathBuf,
-    profile_file: &str,
-) -> Option<RegionStatProfiles> {
-    let path = config_dir.join(format!("data/{}", profile_file));
-
-    if !path.exists() {
-        debug_log!(
-            "[ignite_overlay] Region stat profiles not found at '{}'",
-            path.display()
-        );
-        return None;
-    }
-
-    match fs::read_to_string(&path) {
-        Ok(contents) => match serde_json::from_str::<RegionStatProfiles>(&contents) {
-            Ok(data) => {
-                debug_log!(
-                    "[ignite_overlay] Loaded {} region stat profiles from '{}'",
-                    data.len(),
-                    path.display()
-                );
-                Some(data)
-            }
-            Err(e) => {
-                debug_log!(
-                    "[ignite_overlay] Failed to parse stat profiles JSON '{}': {:?}",
-                    path.display(),
-                    e
-                );
-                None
-            }
-        },
-        Err(e) => {
-            debug_log!(
-                "[ignite_overlay] Could not read stat profiles '{}': {:?}",
-                path.display(),
-                e
-            );
-            None
-        }
-    }
 }
