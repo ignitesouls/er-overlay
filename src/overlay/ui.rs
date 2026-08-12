@@ -11,7 +11,7 @@ use imgui::{Ui, Key};
 
 use crate::{
     debug_log,
-    ingest::{IngestSettings, SharedIngestStatus, create_status, start_reporter, tally_line},
+    ingest::{IngestSettings, SharedIngestStatus, create_status, start_reporter, status_line},
     overlay::{core::start_game_monitor, data::{AppState, BossRegions, create_state, load_localized_boss_data},
     style::{DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config, apply_style_config, parse_key_combo, read_config}},
     util::{debug::attach_console, introspection::get_dll_directory, text_formatter::format_display_text}
@@ -179,7 +179,7 @@ impl EROverlayUi {
 
         if self.show_ingest_tally {
             if let Ok(status) = self.ingest_status.read() {
-                if let Some(line) = tally_line(&status) {
+                if let Some(line) = status_line(&status) {
                     // Padded to match how `format_display_text` emits lines.
                     lines.push(format!(" {} ", line));
                 }

@@ -598,31 +598,79 @@ fn sleep_interruptible(total: Duration, stop: &Arc<AtomicBool>) -> bool {
 // ----------------------------------------------------
 //
 
-/// Renders the one-line tally, or `None` when the line should be hidden.
+/// Renders the one-line status, or `None` when the line should be hidden.
 ///
-/// Everything shown comes from the last response. `Acc -` rather than `0%`
-/// before the first shot, because nothing has missed yet.
-pub fn tally_line(status: &IngestStatus) -> Option<String> {
+/// Everything shown comes from the last response; nothing is computed here.
+///
+/// The ordering matters. A failure is shown *before* the eligibility check,
+/// because the failures worth telling someone about — a bad token, or being in
+/// two live matches — all happen before a first report ever succeeds. Gating
+/// them behind "we already had a good response" meant the compact line stayed
+/// empty in exactly the situation where the player most needs to know something
+/// is wrong.
+pub fn status_line(status: &IngestStatus) -> Option<String> {
+    if status.warn {
+        let reason = status
+            .last_error
+            .as_deref()
+            .map(short_reason)
+            .unwrap_or_else(|| "failed".to_string());
+
+        return Some(match status.tally {
+            // There is a tally to show, so keep the line narrow and leave the
+            // reason to expanded mode.
+            Some(t) => format!("{}   [!]", tally_text(&t)),
+            // Nothing else to show, so the reason IS the line.
+            None => format!("Autofire [!] {reason}"),
+        });
+    }
+
     if !status.eligible {
         return None;
     }
-    let tally = status.tally?;
 
-    // ASCII only. The overlay's embedded font covers Latin characters, so a
-    // warning sign or an em dash renders as a `?` box and the reassurance the
-    // line exists for turns into a puzzle.
-    let acc = if tally.shots == 0 {
+    Some(match status.tally {
+        Some(t) => tally_text(&t),
+        // Accepted, but the server sent no tally. Still worth confirming the
+        // round trip is working.
+        None => "Autofire connected".to_string(),
+    })
+}
+
+/// ASCII only. The overlay's embedded font covers Latin characters, so a warning
+/// sign or an em dash renders as a `?` box, and the reassurance the line exists
+/// for turns into a puzzle.
+fn tally_text(t: &Tally) -> String {
+    let acc = if t.shots == 0 {
+        // Nothing has missed yet, so `0%` would be a lie.
         "-".to_string()
     } else {
-        format!("{}%", tally.accuracy)
+        format!("{}%", t.accuracy)
     };
 
-    let warn = if status.warn { "   [!]" } else { "" };
+    format!(
+        "Hit {}   Miss {}   Total {}   Acc {}",
+        t.hits, t.misses, t.shots, acc
+    )
+}
 
-    Some(format!(
-        "Hit {}   Miss {}   Total {}   Acc {}{}",
-        tally.hits, tally.misses, tally.shots, acc, warn
-    ))
+/// Turns a wire error into something readable at a glance mid-fight.
+///
+/// The raw code stays in expanded mode, which is where someone actually
+/// debugging will look.
+fn short_reason(error: &str) -> String {
+    match error {
+        // The one that is genuinely confusing without an explanation: leaving a
+        // match does not end it, so a stale room still counts as live.
+        "ambiguous_match" => "in 2 live matches".to_string(),
+        "missing_token" | "unknown_token" => "bad token".to_string(),
+        "no_opponents" => "no opponents".to_string(),
+        e if e.starts_with("transport") => "no connection".to_string(),
+        e if e.starts_with("HTTP") || e.starts_with("read body") => "server error".to_string(),
+        // Anything unrecognised passes through, clipped so it cannot stretch
+        // the panel across the screen.
+        e => e.chars().take(24).collect(),
+    }
 }
 
 #[cfg(test)]
@@ -748,7 +796,7 @@ mod tests {
             tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
             ..Default::default()
         };
-        assert!(tally_line(&s).is_some());
+        assert!(status_line(&s).is_some());
 
         // Then an unsupported lobby, applying what the Ineligible arm writes.
         s = IngestStatus {
@@ -758,49 +806,108 @@ mod tests {
             last_error: None,
             kills_tracked: s.kills_tracked,
         };
-        assert_eq!(tally_line(&s), None, "no line at all in an unsupported lobby");
+        assert_eq!(status_line(&s), None, "no line at all in an unsupported lobby");
         assert!(!s.warn, "an unsupported lobby is not a failure to warn about");
         assert!(s.last_error.is_none(), "and nothing to explain in expanded mode");
     }
 
     #[test]
-    fn tally_line_hidden_until_eligible() {
-        let mut s = IngestStatus::default();
-        assert_eq!(tally_line(&s), None);
-        // In a match but no response yet: still nothing to render.
-        s.eligible = true;
-        assert_eq!(tally_line(&s), None);
+    fn status_line_hidden_until_something_is_known() {
+        // Nothing has come back yet, and nothing is wrong: stay off screen.
+        assert_eq!(status_line(&IngestStatus::default()), None);
+    }
+
+    /// The state that used to render nothing at all in compact mode.
+    ///
+    /// `ambiguous_match` arrives before any successful report, so `eligible` is
+    /// still false and there is no tally. Gating the line on either of those
+    /// left the player with a silent overlay and no idea their kills were being
+    /// refused.
+    #[test]
+    fn status_line_reports_a_failure_that_precedes_any_success() {
+        let s = IngestStatus {
+            eligible: false,
+            tally: None,
+            warn: true,
+            last_error: Some("ambiguous_match".into()),
+            kills_tracked: 3,
+        };
+        let line = status_line(&s).expect("a pre-success failure must still show");
+        assert_eq!(line, "Autofire [!] in 2 live matches");
+        assert!(line.is_ascii(), "must render in the embedded font: {line}");
     }
 
     #[test]
-    fn tally_line_renders_response() {
+    fn status_line_explains_the_common_failures() {
+        for (wire, shown) in [
+            ("ambiguous_match", "in 2 live matches"),
+            ("unknown_token", "bad token"),
+            ("missing_token", "bad token"),
+            ("no_opponents", "no opponents"),
+            ("transport: dns error whatever", "no connection"),
+            ("HTTP 503", "server error"),
+        ] {
+            let s = IngestStatus {
+                warn: true,
+                last_error: Some(wire.into()),
+                ..Default::default()
+            };
+            assert_eq!(status_line(&s).unwrap(), format!("Autofire [!] {shown}"));
+        }
+    }
+
+    #[test]
+    fn status_line_clips_an_unrecognised_reason() {
+        let s = IngestStatus {
+            warn: true,
+            last_error: Some("some_enormous_reason_nobody_has_seen_before_at_all".into()),
+            ..Default::default()
+        };
+        let line = status_line(&s).unwrap();
+        assert!(line.len() <= "Autofire [!] ".len() + 24, "panel would stretch: {line}");
+    }
+
+    #[test]
+    fn status_line_confirms_a_round_trip_with_no_tally() {
+        // Accepted, but the server sent no tally. Silence would be
+        // indistinguishable from a broken setup.
+        let s = IngestStatus {
+            eligible: true,
+            tally: None,
+            ..Default::default()
+        };
+        assert_eq!(status_line(&s).unwrap(), "Autofire connected");
+    }
+
+    #[test]
+    fn status_line_renders_response() {
         let s = IngestStatus {
             eligible: true,
             tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
             ..Default::default()
         };
-        assert_eq!(tally_line(&s).unwrap(), "Hit 8   Miss 4   Total 12   Acc 67%");
+        assert_eq!(status_line(&s).unwrap(), "Hit 8   Miss 4   Total 12   Acc 67%");
     }
 
     #[test]
-    fn tally_line_dashes_accuracy_before_first_shot() {
+    fn status_line_dashes_accuracy_before_first_shot() {
         let s = IngestStatus {
             eligible: true,
             tally: Some(Tally::default()),
             ..Default::default()
         };
-        assert_eq!(tally_line(&s).unwrap(), "Hit 0   Miss 0   Total 0   Acc -");
+        assert_eq!(status_line(&s).unwrap(), "Hit 0   Miss 0   Total 0   Acc -");
     }
 
     #[test]
-    fn tally_line_warns_when_last_send_failed() {
+    fn status_line_warns_when_last_send_failed() {
         let s = IngestStatus {
             eligible: true,
             tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
             warn: true,
             ..Default::default()
         };
-        let line = tally_line(&s).unwrap();
+        let line = status_line(&s).unwrap();
         assert!(line.ends_with("[!]"), "{line}");
         // Every character must exist in the Latin-only embedded font.
         assert!(line.is_ascii(), "tally line must stay ASCII: {line}");
@@ -865,7 +972,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            tally_line(&status).unwrap(),
+            status_line(&status).unwrap(),
             "Hit 0   Miss 1   Total 1   Acc 0%"
         );
     }
