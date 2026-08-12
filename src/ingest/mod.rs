@@ -144,8 +144,15 @@ pub struct Tally {
     pub misses: u32,
     #[serde(default)]
     pub shots: u32,
+    /// `None` before the first shot, which the server sends as an explicit
+    /// `null` rather than `0` — nothing has missed yet, so `0%` would be a lie.
+    ///
+    /// This must be `Option`, not a defaulted `i32`: `#[serde(default)]` only
+    /// covers a *missing* field, so `"accuracy": null` would fail to
+    /// deserialise, sink the entire response, and turn every match start into a
+    /// spurious retry storm.
     #[serde(default)]
-    pub accuracy: i32,
+    pub accuracy: Option<i32>,
 }
 
 /// What the overlay renders. Every field is set from the last response — the
@@ -199,7 +206,7 @@ struct IngestResponse {
     ok: bool,
     #[serde(default)]
     error: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_tally")]
     tally: Option<Tally>,
     #[serde(default)]
     fired: Vec<FiredEntry>,
@@ -227,6 +234,22 @@ struct SkippedEntry {
     flag: i64,
     #[serde(default)]
     reason: Option<String>,
+}
+
+/// Reads the tally without letting a surprising shape sink the response.
+///
+/// The tally is cosmetic, but by the time we are reading it the server has
+/// already fired the shots — so a tally we cannot understand must degrade to
+/// "no tally shown", never to a failed parse that we would then retry and
+/// report as an error. This is the lesson from `accuracy` arriving as `null`:
+/// one unexpected field turned a completely successful report into five
+/// retries and a warning glyph.
+fn lenient_tally<'de, D>(deserializer: D) -> Result<Option<Tally>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    Ok(serde_json::from_value::<Option<Tally>>(raw).ok().flatten())
 }
 
 /// Result of one HTTP attempt, classified into what the caller should do next.
@@ -641,11 +664,11 @@ pub fn status_line(status: &IngestStatus) -> Option<String> {
 /// sign or an em dash renders as a `?` box, and the reassurance the line exists
 /// for turns into a puzzle.
 fn tally_text(t: &Tally) -> String {
-    let acc = if t.shots == 0 {
-        // Nothing has missed yet, so `0%` would be a lie.
-        "-".to_string()
-    } else {
-        format!("{}%", t.accuracy)
+    // A dash whenever there is no percentage to state: before the first shot the
+    // server sends null, and nothing has missed yet, so `0%` would be a lie.
+    let acc = match t.accuracy {
+        Some(pct) if t.shots > 0 => format!("{pct}%"),
+        _ => "-".to_string(),
     };
 
     format!(
@@ -793,7 +816,7 @@ mod tests {
         // Mid-match in a bosses room: the line is up.
         let mut s = IngestStatus {
             eligible: true,
-            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
+            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: Some(67) }),
             ..Default::default()
         };
         assert!(status_line(&s).is_some());
@@ -867,6 +890,40 @@ mod tests {
         assert!(line.len() <= "Autofire [!] ".len() + 24, "panel would stretch: {line}");
     }
 
+    /// The exact body the endpoint sends at the start of every match, before
+    /// the player has taken a shot. `accuracy` is an explicit `null`, which a
+    /// defaulted `i32` cannot deserialise — this used to sink the whole response
+    /// and turn a perfectly successful report into a retry storm and a warning.
+    #[test]
+    fn parses_the_match_start_tally_with_null_accuracy() {
+        let raw = r#"{"ok":true,"fired":[],"skipped":[],
+            "tally":{"hits":0,"misses":0,"shots":0,"accuracy":null}}"#;
+        let r: IngestResponse = serde_json::from_str(raw).expect("null accuracy must parse");
+
+        assert!(r.ok);
+        let t = r.tally.expect("tally should survive a null accuracy");
+        assert_eq!((t.hits, t.misses, t.shots, t.accuracy), (0, 0, 0, None));
+
+        // And it renders as a dash, not as a failure and not as 0%.
+        let s = IngestStatus { eligible: true, tally: r.tally, ..Default::default() };
+        assert_eq!(status_line(&s).unwrap(), "Hit 0   Miss 0   Total 0   Acc -");
+    }
+
+    /// A tally shape we do not understand must cost us the tally, never the
+    /// report: the shots have already been fired by the time we read it.
+    #[test]
+    fn an_unreadable_tally_does_not_sink_the_response() {
+        // `[]` is deliberately absent: serde reads a struct from a sequence, so
+        // an empty array is a legitimately zeroed tally rather than a broken one.
+        for weird in [r#""nonsense""#, "42", "null", r#"{"hits":"lots"}"#] {
+            let raw = format!(r#"{{"ok":true,"fired":[],"skipped":[],"tally":{weird}}}"#);
+            let r: IngestResponse =
+                serde_json::from_str(&raw).unwrap_or_else(|e| panic!("{weird} broke parsing: {e}"));
+            assert!(r.ok, "{weird} should still be a successful report");
+            assert!(r.tally.is_none(), "{weird} should degrade to no tally");
+        }
+    }
+
     #[test]
     fn status_line_confirms_a_round_trip_with_no_tally() {
         // Accepted, but the server sent no tally. Silence would be
@@ -883,7 +940,7 @@ mod tests {
     fn status_line_renders_response() {
         let s = IngestStatus {
             eligible: true,
-            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
+            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: Some(67) }),
             ..Default::default()
         };
         assert_eq!(status_line(&s).unwrap(), "Hit 8   Miss 4   Total 12   Acc 67%");
@@ -903,7 +960,7 @@ mod tests {
     fn status_line_warns_when_last_send_failed() {
         let s = IngestStatus {
             eligible: true,
-            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
+            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: Some(67) }),
             warn: true,
             ..Default::default()
         };
@@ -923,7 +980,7 @@ mod tests {
         assert!(r.ok);
         assert_eq!(r.fired.len(), 1);
         assert_eq!(r.fired[0].cell, Some(37));
-        assert_eq!(r.tally.unwrap().accuracy, 67);
+        assert_eq!(r.tally.unwrap().accuracy, Some(67));
     }
 
     #[test]
@@ -1064,7 +1121,8 @@ mod tests {
         let r: IngestResponse =
             serde_json::from_str(r#"{"ok":true,"tally":{"hits":3},"fired":[{"flag":1}]}"#).unwrap();
         let t = r.tally.unwrap();
-        assert_eq!((t.hits, t.misses, t.shots, t.accuracy), (3, 0, 0, 0));
+        // A missing accuracy is as absent as a null one.
+        assert_eq!((t.hits, t.misses, t.shots, t.accuracy), (3, 0, 0, None));
         assert_eq!(r.fired[0].cell, None);
 
         let r: IngestResponse = serde_json::from_str(r#"{}"#).unwrap();
