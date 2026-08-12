@@ -11,6 +11,7 @@ use imgui::{Ui, Key};
 
 use crate::{
     debug_log,
+    ingest::{IngestSettings, SharedIngestStatus, create_status, start_reporter, tally_line},
     overlay::{core::start_game_monitor, data::{AppState, BossRegions, create_state, load_localized_boss_data},
     style::{DEFAULT_DISPLAY_TEXT, DEFAULT_PANEL_POS, IgniteConfig, TimerMode, apply_common_config, apply_style_config, parse_key_combo, read_config}},
     util::{debug::attach_console, introspection::get_dll_directory, text_formatter::format_display_text}
@@ -43,6 +44,11 @@ pub struct EROverlayUi {
     timer_target_ms: u32,
 
     monitor_stop: Arc<AtomicBool>,
+
+    /// `None` unless `[ingest]` has both a url and a token.
+    ingest_settings: Option<IngestSettings>,
+    ingest_status: SharedIngestStatus,
+    show_ingest_tally: bool,
 }
 
 impl EROverlayUi {
@@ -101,6 +107,19 @@ impl EROverlayUi {
             .and_then(|t| t.timer_minutes)
             .unwrap_or(0) * 60_000;
 
+        let ingest_settings = IngestSettings::from_config(
+            config.as_ref().and_then(|c| c.ingest.as_ref())
+        );
+
+        // The tally line can only ever appear when reporting is on, and it
+        // stays hidden until the server reports a live match.
+        let show_ingest_tally = ingest_settings.is_some()
+            && config
+                .as_ref()
+                .and_then(|c| c.overlay.as_ref())
+                .and_then(|o| o.show_ingest_tally)
+                .unwrap_or(true);
+
         Self {
             last_click_time: Instant::now(),
             last_toggle_time: Instant::now(),
@@ -117,37 +136,38 @@ impl EROverlayUi {
             prep_time_ms,
             timer_target_ms,
             monitor_stop: Arc::new(AtomicBool::new(false)),
+            ingest_settings,
+            ingest_status: create_status(),
+            show_ingest_tally,
         }
     }
 
-    fn render_closed(&mut self, ui: &Ui) {
-        self.write_igt();
-        let mut death_count: u32 = 0;
-        let mut shard_count: u32 = 0;
-        let mut great_runes_count = 0;
-        let mut defeated = 0;
-        let mut total = 0;
-        if let Ok(state) = self.state.read() {
-            shard_count = state.key_item_quantity;
-            death_count = state.death_count;
-            great_runes_count = state.great_runes;
-            let flags = &state.event_flags;
-            defeated = flags.values().filter(|&&b| b).count();
-            total = flags.len();
-        }
-
-        // Build variable map
-        let vars = {
-            let igt_str = self.timer_buf.clone();
-            HashMap::from([
-                ("kills", defeated.to_string()),
-                ("total", total.to_string()),
-                ("deaths", death_count.to_string()),
-                ("igt", igt_str),
-                ("shards", shard_count.to_string()),
-                ("runes", great_runes_count.to_string()), // placeholder for future "great runes"
-            ])
+    /// The HUD text block: the configured display template, plus the
+    /// kill-reporting tally when there is one to show.
+    ///
+    /// Shared by both render modes and by the compact-mode size measurement, so
+    /// the window is always sized for exactly what gets drawn.
+    fn build_lines(&self) -> Vec<String> {
+        let (defeated, total, deaths, shards, runes) = if let Ok(state) = self.state.read() {
+            (
+                state.event_flags.values().filter(|&&b| b).count(),
+                state.event_flags.len(),
+                state.death_count,
+                state.key_item_quantity,
+                state.great_runes,
+            )
+        } else {
+            (0, 0, 0, 0, 0)
         };
+
+        let vars = HashMap::from([
+            ("kills", defeated.to_string()),
+            ("total", total.to_string()),
+            ("deaths", deaths.to_string()),
+            ("igt", self.timer_buf.clone()),
+            ("shards", shards.to_string()),
+            ("runes", runes.to_string()),
+        ]);
 
         let template = self.config
             .as_ref()
@@ -155,7 +175,23 @@ impl EROverlayUi {
             .and_then(|o| o.display_text.as_deref())
             .unwrap_or(DEFAULT_DISPLAY_TEXT);
 
-        let lines = format_display_text(template, &vars);
+        let mut lines = format_display_text(template, &vars);
+
+        if self.show_ingest_tally {
+            if let Ok(status) = self.ingest_status.read() {
+                if let Some(line) = tally_line(&status) {
+                    // Padded to match how `format_display_text` emits lines.
+                    lines.push(format!(" {} ", line));
+                }
+            }
+        }
+
+        lines
+    }
+
+    fn render_closed(&mut self, ui: &Ui) {
+        self.write_igt();
+        let lines = self.build_lines();
         Self::render_centered_text_block(ui, &lines);
 
         let total_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
@@ -173,42 +209,19 @@ impl EROverlayUi {
 
     fn render_open(&mut self, ui: &Ui) {
         self.write_igt();
-        let mut death_count: u32 = 0;
-        let mut shard_count: u32 = 0;
-        let mut great_runes_count = 0;
-        let mut defeated = 0;
-        let mut total = 0;
-        if let Ok(state) = self.state.read() {
-            shard_count = state.key_item_quantity;
-            death_count = state.death_count;
-            great_runes_count = state.great_runes;
-            let flags = &state.event_flags;
-            defeated = flags.values().filter(|&&b| b).count();
-            total = flags.len();
+        let lines = self.build_lines();
+        for line in &lines {
+            ui.text(line);
         }
 
-        // Build variable map
-        let vars = {
-            let igt_str = self.timer_buf.clone();
-            HashMap::from([
-                ("kills", defeated.to_string()),
-                ("total", total.to_string()),
-                ("deaths", death_count.to_string()),
-                ("igt", igt_str),
-                ("shards", shard_count.to_string()),
-                ("runes", great_runes_count.to_string()), // placeholder for future "great runes"
-            ])
-        };
-
-        let template = self.config
-            .as_ref()
-            .and_then(|c| c.overlay.as_ref())
-            .and_then(|o| o.display_text.as_deref())
-            .unwrap_or(DEFAULT_DISPLAY_TEXT);
-
-        let lines = format_display_text(template, &vars);
-        for line in lines.clone() {
-            ui.text(line);
+        // In expanded mode there is room to say *why* the tally is stale.
+        if self.show_ingest_tally {
+            if let Ok(status) = self.ingest_status.read() {
+                if let Some(err) = status.last_error.as_deref() {
+                    let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.6, 0.2, 1.0]);
+                    ui.text(format!(" ⚠ last report failed: {} ", err));
+                }
+            }
         }
 
         let header_h = ui.text_line_height_with_spacing() * lines.len() as f32 + 8.0;
@@ -267,33 +280,7 @@ impl EROverlayUi {
 
     fn measure_closed_size(&mut self, ui: &Ui) -> (f32, f32) {
         self.write_igt();
-
-        let (defeated, total, deaths, shards, runes) = if let Ok(state) = self.state.read() {
-            (
-                state.event_flags.values().filter(|&&b| b).count(),
-                state.event_flags.len(),
-                state.death_count,
-                state.key_item_quantity,
-                state.great_runes,
-            )
-        } else { (0, 0, 0, 0, 0) };
-
-        let vars = HashMap::from([
-            ("kills", defeated.to_string()),
-            ("total", total.to_string()),
-            ("deaths", deaths.to_string()),
-            ("igt", self.timer_buf.clone()),
-            ("shards", shards.to_string()),
-            ("runes", runes.to_string()),
-        ]);
-
-        let template = self.config
-            .as_ref()
-            .and_then(|c| c.overlay.as_ref())
-            .and_then(|o| o.display_text.as_deref())
-            .unwrap_or(DEFAULT_DISPLAY_TEXT);
-
-        let lines = format_display_text(template, &vars);
+        let lines = self.build_lines();
 
         // Split lines for accurate height calc
         let pad = unsafe { ui.style().window_padding };
@@ -565,6 +552,14 @@ impl ImguiRenderLoop for EROverlayUi {
         // Messmer's Kindling Shard
         let key_item_id = 2008021;
 
+        // Kill reporting, if configured. Returns `None` when it is not, and the
+        // monitor then behaves exactly as it did before this feature existed.
+        let ingest_tx = start_reporter(
+            self.ingest_settings.clone(),
+            self.ingest_status.clone(),
+            self.monitor_stop.clone(),
+        );
+
         // Kick off the background game monitor
         start_game_monitor(
             self.state.clone(),
@@ -572,7 +567,8 @@ impl ImguiRenderLoop for EROverlayUi {
             flag_ids,
             key_item_id,
             100,
-            self.monitor_stop.clone()
+            self.monitor_stop.clone(),
+            ingest_tx,
         );
 
         debug_log!("[ignite_overlay] Game monitor started successfully.");

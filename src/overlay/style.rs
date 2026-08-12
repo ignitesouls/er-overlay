@@ -56,6 +56,21 @@ pub struct Boss {
 #[derive(Debug, Deserialize)]
 pub struct Overlay {
     pub display_text: Option<String>,
+    /// Show the one-line kill-reporting tally, top right. Only ever visible
+    /// when `[ingest]` is configured and the server says a match is live.
+    pub show_ingest_tally: Option<bool>,
+}
+
+/// Kill reporting over HTTP. The whole feature stays off unless both `url` and
+/// `token` are set, so an existing install is unaffected until it opts in.
+#[derive(Debug, Deserialize)]
+pub struct Ingest {
+    pub url: Option<String>,
+    pub token: Option<String>,
+    /// Minimum gap between requests; bursts of kills coalesce into one send.
+    pub interval_ms: Option<u64>,
+    /// How often to resend the full kill set when nothing has changed.
+    pub heartbeat_s: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize)]
@@ -82,6 +97,7 @@ pub struct IgniteConfig {
     pub boss: Option<Boss>,
     pub overlay: Option<Overlay>,
     pub timer: Option<TimerConfig>,
+    pub ingest: Option<Ingest>,
 }
 
 pub fn read_config() -> Result<IgniteConfig, String> {

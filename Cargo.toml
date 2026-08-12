@@ -25,3 +25,10 @@ serde_json = "1.0.145"
 hudhook = "0.8.2"
 imgui = "0.12.0"
 crossbeam = "0.8"
+
+# Blocking HTTP for kill reporting. Deliberately not async: there is no tokio
+# in this project and a runtime would be disproportionate for a handful of
+# requests per hour. Default features give rustls over `ring`, which needs no
+# cmake/NASM on windows-msvc, and webpki roots so TLS does not depend on the
+# machine's certificate store.
+ureq = "3.4"

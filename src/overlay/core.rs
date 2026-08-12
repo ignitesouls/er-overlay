@@ -1,7 +1,9 @@
-use std::{thread, time::{Duration}, sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}}};
+use std::{thread, time::{Duration, SystemTime}, sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}}};
+use crossbeam::channel::Sender;
 // use fromsoftware_shared::{program::Program};
 use crate::{
     debug_log,
+    ingest::KillSnapshot,
     overlay::data::SharedState,
     er::{
         events::{try_resolve_eventflagman, read_entry_size, read_root, build_cache, read_from_flag_location},
@@ -17,7 +19,10 @@ pub fn start_game_monitor(
     flag_ids: Vec<i32>,
     key_item_id: i32,
     poll_ms: u64,
-    stop: Arc<AtomicBool>
+    stop: Arc<AtomicBool>,
+    // `None` when kill reporting is not configured, in which case this loop does
+    // no extra work per tick.
+    ingest_tx: Option<Sender<KillSnapshot>>,
 ) {
     // The event flags that indicate each Great Rune being owned.
     let great_rune_flags = vec![181, 182, 183, 184, 185, 186, 187];
@@ -122,6 +127,12 @@ pub fn start_game_monitor(
             // --- Step 2: read new data
             let mut changed = false;
 
+            // Tracked separately from `changed`, which also covers runes,
+            // shards and deaths — the kill reporter only cares about flags.
+            let mut flags_changed = false;
+            let mut kills: Vec<i32> = Vec::new();
+            let observed_at = SystemTime::now();
+
             // Update event flags
             for (&flag_id, loc) in &boss_cache {
                 if loc.base.is_null() {
@@ -129,18 +140,35 @@ pub fn start_game_monitor(
                 }
 
                 let flag_state = read_from_flag_location(loc);
+                if flag_state && ingest_tx.is_some() {
+                    kills.push(flag_id);
+                }
                 match prev_flags.get(&flag_id) {
                     Some(&old) if old != flag_state => {
                         prev_flags.insert(flag_id, flag_state);
                         changed = true;
+                        flags_changed = true;
                     }
                     None => {
                         prev_flags.insert(flag_id, flag_state);
                         changed = true;
+                        flags_changed = true;
                     }
                     _ => {}
                 }
             };
+
+            // Hand the reporter the same snapshot the HUD is about to draw
+            // from, rather than polling the game a second time. Only on a
+            // transition: the reporter owns its own heartbeat, so this adds no
+            // competing timer. Reads only — flags are never written here.
+            if let Some(tx) = ingest_tx.as_ref() {
+                if flags_changed {
+                    // Unbounded channel, so this never blocks the monitor. A
+                    // send only fails once the reporter has exited.
+                    let _ = tx.send(KillSnapshot { kills, observed_at });
+                }
+            }
 
             // Update Great Rune count
             let mut new_runes = 0;

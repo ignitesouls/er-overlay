@@ -126,3 +126,34 @@ data_file="bosses.json"
 #  {shards}= Number of messmer's kindling shards acquired
 #  {runes} = Number of great runes acquired
 display_text = "IGT: {igt}$nBosses: {kills}/{total}$nGreat Runes: {runes}$nShards: {shards}$nDeaths: {deaths}"
+
+# show the one-line kill-reporting tally (see [ingest] below).
+# Has no effect unless [ingest] is configured, and the line stays hidden
+# until the server confirms you are in a live match.
+show_ingest_tally = true
+
+[ingest]
+# Optional kill reporting. Whenever a tracked boss flag turns true, the overlay
+# POSTs the full set of observed kills to `url` so a tracker website can mark it
+# for you.
+#
+# THIS IS OFF UNTIL YOU PASTE A TOKEN. Leaving `token` empty (or removing this
+# whole section) keeps the overlay behaving exactly as it does without it: no
+# network access of any kind.
+#
+# Reporting is read-only. The overlay never writes event flags — it only reads
+# the same ones it already reads to draw the boss list.
+#
+# Get your token from the tracker website and paste it once; it is permanent and
+# does not need changing between matches, teams or rooms.
+url = "https://zltjdeikpsbohvgtmmsn.supabase.co/functions/v1/auto-fire"
+token = ""
+
+# Minimum gap between requests, in milliseconds. Kills that land close together
+# are coalesced into a single report rather than one request each.
+interval_ms = 1000
+
+# How often to resend the full kill set when nothing has changed, in seconds.
+# This is the safety net: if a report is ever dropped, the next heartbeat
+# delivers it, so nothing needs acknowledgements or retry bookkeeping.
+heartbeat_s = 60
