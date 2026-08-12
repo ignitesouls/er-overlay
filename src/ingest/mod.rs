@@ -152,13 +152,13 @@ pub struct Tally {
 /// overlay holds no tally state of its own.
 #[derive(Debug, Clone, Default)]
 pub struct IngestStatus {
-    /// False once the server has told us `not_in_match`. The tally line is
-    /// hidden in that state.
-    pub in_match: bool,
+    /// Whether the server will act on our reports at all — see [`INELIGIBLE`].
+    /// The tally line is hidden entirely while this is false, so the overlay
+    /// stays off screen in a lobby that kill reporting does not apply to.
+    pub eligible: bool,
     pub tally: Option<Tally>,
-    /// Last send failed or was rejected for a reason other than
-    /// `not_in_match`. Without this a stale tally looks identical to a live
-    /// one.
+    /// Last send failed, or was rejected for a reason outside [`INELIGIBLE`].
+    /// Without this a stale tally looks identical to a live one.
     pub warn: bool,
     /// Short reason for `warn`, for the expanded overlay and logs.
     pub last_error: Option<String>,
@@ -233,25 +233,38 @@ struct SkippedEntry {
 enum Attempt {
     /// `ok: true`.
     Accepted(IngestResponse),
+    /// This match is not one the server will act on: the player is not in a
+    /// live match, or its square set is not the one kill reporting supports.
+    /// Normal, not a failure, and not worth a retry.
+    Ineligible(String),
     /// `ok: false` with a reason that will not change on retry.
     Rejected(String),
-    /// The player is not in a live match. The normal, common case — not a
-    /// failure, and not worth a retry.
-    NotInMatch,
     /// Transport failure, 5xx or 429 — worth retrying.
     Retryable(String),
 }
 
+/// Rejections that mean reporting simply does not apply here, rather than that
+/// something is wrong.
+///
+/// These hide the overlay line instead of warning on it. `not_in_match` is the
+/// idle case, and `unsupported_square_set` is a lobby whose squares no event
+/// flag can settle — an objective set like "collect 4 unique helms". In neither
+/// case is there anything for the player to act on, and a warning glyph over a
+/// tally left from an earlier match would claim their kills are being lost when
+/// there is nothing to lose.
+const INELIGIBLE: [&str; 2] = ["not_in_match", "unsupported_square_set"];
+
 /// Classifies an `ok: false` reply.
 ///
-/// `not_in_match` is the normal, common case — the player simply is not in a
-/// live match — and must not be treated as a failure. Everything else,
-/// including anything unrecognised, is permanent: retrying `unknown_token`
-/// cannot help, and treating an unexpected reply as retryable would turn a
-/// server-side change into a hot loop.
+/// Anything not in [`INELIGIBLE`], including anything unrecognised, is treated
+/// as a permanent rejection: retrying `unknown_token` cannot help, and treating
+/// an unexpected reply as retryable would turn a server-side change into a hot
+/// loop. `ambiguous_match` deliberately lands here rather than in `INELIGIBLE`,
+/// because it is a real misconfiguration the player can fix — two live matches
+/// — and silence would leave them wondering why nothing fires.
 fn classify_rejection(error: String) -> Attempt {
-    if error == "not_in_match" {
-        Attempt::NotInMatch
+    if INELIGIBLE.contains(&error.as_str()) {
+        Attempt::Ineligible(error)
     } else {
         Attempt::Rejected(error)
     }
@@ -423,7 +436,7 @@ fn send_with_retry(
                 log_accepted(&resp);
                 let mut w = status.write().unwrap();
                 *w = IngestStatus {
-                    in_match: true,
+                    eligible: true,
                     tally: resp.tally,
                     warn: false,
                     last_error: None,
@@ -431,13 +444,20 @@ fn send_with_retry(
                 };
                 return;
             }
-            Attempt::NotInMatch => {
-                // Expected whenever the player simply is not playing a match.
+            // Underscored so release builds, where `debug_log!` compiles away,
+            // do not see it as unused.
+            Attempt::Ineligible(_reason) => {
+                debug_log!("[ignite_overlay] [ingest] idle: {_reason}");
+                // Wipe the tally rather than leave the last match's numbers
+                // sitting on screen in a lobby this does not apply to.
                 let mut w = status.write().unwrap();
-                w.in_match = false;
-                w.warn = false;
-                w.last_error = None;
-                w.kills_tracked = first_seen.len();
+                *w = IngestStatus {
+                    eligible: false,
+                    tally: None,
+                    warn: false,
+                    last_error: None,
+                    kills_tracked: first_seen.len(),
+                };
                 return;
             }
             Attempt::Rejected(error) => {
@@ -580,10 +600,10 @@ fn sleep_interruptible(total: Duration, stop: &Arc<AtomicBool>) -> bool {
 
 /// Renders the one-line tally, or `None` when the line should be hidden.
 ///
-/// Everything shown comes from the last response. `Acc —` rather than `0%`
+/// Everything shown comes from the last response. `Acc -` rather than `0%`
 /// before the first shot, because nothing has missed yet.
 pub fn tally_line(status: &IngestStatus) -> Option<String> {
-    if !status.in_match {
+    if !status.eligible {
         return None;
     }
     let tally = status.tally?;
@@ -689,12 +709,16 @@ mod tests {
         assert_eq!(seen[&3], t1);
     }
 
+    /// Neither of these is a failure: one is idling, the other is a lobby kill
+    /// reporting does not apply to. Both hide the line rather than warn.
     #[test]
-    fn not_in_match_is_not_a_failure() {
-        assert!(matches!(
-            classify_rejection("not_in_match".into()),
-            Attempt::NotInMatch
-        ));
+    fn ineligible_replies_are_not_failures() {
+        for e in ["not_in_match", "unsupported_square_set"] {
+            assert!(
+                matches!(classify_rejection(e.into()), Attempt::Ineligible(_)),
+                "{e} should be ineligible, not a failure"
+            );
+        }
     }
 
     #[test]
@@ -702,8 +726,8 @@ mod tests {
         for e in [
             "missing_token",
             "unknown_token",
+            // Fixable by the player, so it must stay visible rather than hide.
             "ambiguous_match",
-            "unsupported_square_set",
             // An error this build has never heard of must not be retried.
             "something_added_server_side_later",
         ] {
@@ -714,19 +738,44 @@ mod tests {
         }
     }
 
+    /// The overlay must leave the screen in a lobby that does not support kill
+    /// reporting — including when a previous match left a tally behind.
     #[test]
-    fn tally_line_hidden_when_not_in_match() {
+    fn line_hides_in_an_unsupported_lobby() {
+        // Mid-match in a bosses room: the line is up.
+        let mut s = IngestStatus {
+            eligible: true,
+            tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
+            ..Default::default()
+        };
+        assert!(tally_line(&s).is_some());
+
+        // Then an unsupported lobby, applying what the Ineligible arm writes.
+        s = IngestStatus {
+            eligible: false,
+            tally: None,
+            warn: false,
+            last_error: None,
+            kills_tracked: s.kills_tracked,
+        };
+        assert_eq!(tally_line(&s), None, "no line at all in an unsupported lobby");
+        assert!(!s.warn, "an unsupported lobby is not a failure to warn about");
+        assert!(s.last_error.is_none(), "and nothing to explain in expanded mode");
+    }
+
+    #[test]
+    fn tally_line_hidden_until_eligible() {
         let mut s = IngestStatus::default();
         assert_eq!(tally_line(&s), None);
         // In a match but no response yet: still nothing to render.
-        s.in_match = true;
+        s.eligible = true;
         assert_eq!(tally_line(&s), None);
     }
 
     #[test]
     fn tally_line_renders_response() {
         let s = IngestStatus {
-            in_match: true,
+            eligible: true,
             tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
             ..Default::default()
         };
@@ -736,7 +785,7 @@ mod tests {
     #[test]
     fn tally_line_dashes_accuracy_before_first_shot() {
         let s = IngestStatus {
-            in_match: true,
+            eligible: true,
             tally: Some(Tally::default()),
             ..Default::default()
         };
@@ -746,7 +795,7 @@ mod tests {
     #[test]
     fn tally_line_warns_when_last_send_failed() {
         let s = IngestStatus {
-            in_match: true,
+            eligible: true,
             tally: Some(Tally { hits: 8, misses: 4, shots: 12, accuracy: 67 }),
             warn: true,
             ..Default::default()
@@ -811,7 +860,7 @@ mod tests {
 
         // One shot taken, so accuracy renders as a number rather than a dash.
         let status = IngestStatus {
-            in_match: true,
+            eligible: true,
             tally: r.tally,
             ..Default::default()
         };
@@ -886,7 +935,7 @@ mod tests {
 
         match send_once(&agent, &url, &build_body(&token, &empty).unwrap()) {
             Attempt::Accepted(r) => println!("accepted, tally = {:?}", r.tally),
-            Attempt::NotInMatch => println!("not_in_match (expected while idle)"),
+            Attempt::Ineligible(r) => println!("ineligible: {r} (expected while idle)"),
             Attempt::Rejected(e) => panic!("unexpectedly rejected: {e}"),
             Attempt::Retryable(e) => panic!("transport failure: {e}"),
         }
@@ -897,7 +946,7 @@ mod tests {
         match send_once(&agent, &url, &bogus) {
             Attempt::Rejected(e) => assert_eq!(e, "unknown_token"),
             Attempt::Accepted(_) => panic!("an unknown token was accepted"),
-            Attempt::NotInMatch => panic!("an unknown token returned not_in_match"),
+            Attempt::Ineligible(r) => panic!("an unknown token was treated as ineligible: {r}"),
             Attempt::Retryable(e) => panic!("expected a permanent rejection, got retryable: {e}"),
         }
     }
