@@ -814,6 +814,32 @@ mod tests {
         assert_eq!(r.fired[0].result.as_deref(), Some("miss"));
     }
 
+    /// The config this repo ships must parse, and must leave reporting off.
+    ///
+    /// Guards two regressions at once: a malformed `[ingest]` section reaching a
+    /// release, and a real token being committed by accident.
+    #[test]
+    fn shipped_config_parses_and_leaves_ingest_off() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/ignite_overlay_config.toml");
+        let raw = std::fs::read_to_string(path).expect("shipped config should exist");
+        let cfg: crate::overlay::style::IgniteConfig =
+            toml::from_str(&raw).expect("shipped config should deserialise");
+
+        let ingest = cfg.ingest.as_ref().expect("[ingest] section should be present");
+        assert!(
+            !ingest.url.as_deref().unwrap_or("").is_empty(),
+            "the endpoint url should ship filled in, so only a token is needed"
+        );
+        assert!(
+            ingest.token.as_deref().unwrap_or("").is_empty(),
+            "the shipped config must NOT contain a token"
+        );
+        assert!(
+            IngestSettings::from_config(cfg.ingest.as_ref()).is_none(),
+            "reporting must be off in the shipped config"
+        );
+    }
+
     /// Exercises the real network path — ureq, TLS, serialisation and response
     /// classification — end to end. Ignored by default because it needs a
     /// network and a token; run it with:
