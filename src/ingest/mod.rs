@@ -588,13 +588,16 @@ pub fn tally_line(status: &IngestStatus) -> Option<String> {
     }
     let tally = status.tally?;
 
+    // ASCII only. The overlay's embedded font covers Latin characters, so a
+    // warning sign or an em dash renders as a `?` box and the reassurance the
+    // line exists for turns into a puzzle.
     let acc = if tally.shots == 0 {
-        "—".to_string()
+        "-".to_string()
     } else {
         format!("{}%", tally.accuracy)
     };
 
-    let warn = if status.warn { "   ⚠" } else { "" };
+    let warn = if status.warn { "   [!]" } else { "" };
 
     Some(format!(
         "Hit {}   Miss {}   Total {}   Acc {}{}",
@@ -737,7 +740,7 @@ mod tests {
             tally: Some(Tally::default()),
             ..Default::default()
         };
-        assert_eq!(tally_line(&s).unwrap(), "Hit 0   Miss 0   Total 0   Acc —");
+        assert_eq!(tally_line(&s).unwrap(), "Hit 0   Miss 0   Total 0   Acc -");
     }
 
     #[test]
@@ -748,7 +751,10 @@ mod tests {
             warn: true,
             ..Default::default()
         };
-        assert!(tally_line(&s).unwrap().ends_with('⚠'));
+        let line = tally_line(&s).unwrap();
+        assert!(line.ends_with("[!]"), "{line}");
+        // Every character must exist in the Latin-only embedded font.
+        assert!(line.is_ascii(), "tally line must stay ASCII: {line}");
     }
 
     #[test]

@@ -219,7 +219,9 @@ impl EROverlayUi {
             if let Ok(status) = self.ingest_status.read() {
                 if let Some(err) = status.last_error.as_deref() {
                     let _c = ui.push_style_color(imgui::StyleColor::Text, [1.0, 0.6, 0.2, 1.0]);
-                    ui.text(format!(" ⚠ last report failed: {} ", err));
+                    // Wrapped, not clipped: the reason is the useful part, and
+                    // the panel is narrow enough to cut it off mid-word.
+                    ui.text_wrapped(format!(" [!] last report failed: {} ", err));
                 }
             }
         }
