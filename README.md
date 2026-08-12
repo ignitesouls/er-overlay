@@ -40,23 +40,33 @@ mark a boss the moment it dies instead of you alt-tabbing to click it.
 **This is off by default.** Until you paste a token the overlay makes no network
 requests at all and behaves exactly as it always has.
 
-To turn it on, edit the `[ingest]` section of `ignite_overlay_config.toml` and
-paste the token your tracker gave you:
+This is a generic webhook, not a client for any particular site — any tracker
+that wants boss kills can accept the same payload. Your tracker supplies the
+endpoint; the overlay ships pointing at nothing.
+
+To turn it on, edit the `[ingest]` section of `ignite_overlay_config.toml`:
 
 ```toml
 [ingest]
-url = "https://zltjdeikpsbohvgtmmsn.supabase.co/functions/v1/auto-fire"
-token = "your-token-here"
-interval_ms = 1000
-heartbeat_s = 60
+url = "https://your-tracker.example/kills"   # from your tracker
+token = "your-token"                          # from your tracker
+interval_ms = 1000                            # optional
+heartbeat_s = 60                              # optional
 ```
 
-The token is permanent — paste it once and it keeps working across matches,
-teams and rooms. Clearing it, or deleting the section, turns reporting back off.
+Most trackers will hand you that block ready to paste. The token is per-player
+and permanent — paste it once and it keeps working across matches, teams and
+rooms. Clearing either value, or deleting the section, turns reporting back off.
 
 What gets sent is only your token and the ids of the boss flags currently
-observed as killed. The overlay holds no knowledge of what the tracker does with
-them; the server works out the rest.
+observed as killed:
+
+```json
+{ "token": "…", "kills": [ { "flag": 1042360800, "at": "2026-08-13T19:04:12.140Z" } ] }
+```
+
+The overlay holds no knowledge of what the tracker does with them — no teams, no
+boards, no rooms. The server works out the rest.
 
 A few properties worth knowing:
 

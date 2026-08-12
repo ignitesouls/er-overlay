@@ -144,9 +144,16 @@ show_ingest_tally = true
 # Reporting is read-only. The overlay never writes event flags — it only reads
 # the same ones it already reads to draw the boss list.
 #
-# Get your token from the tracker website and paste it once; it is permanent and
-# does not need changing between matches, teams or rooms.
-url = "https://zltjdeikpsbohvgtmmsn.supabase.co/functions/v1/auto-fire"
+# Both values come from whichever tracker you are using — its setup page should
+# hand you this whole block ready to paste. `url` is deliberately blank here:
+# this is a general-purpose kill-reporting webhook, not a client for any one
+# site, so it ships pointing at nothing.
+#
+# The token is per-player and permanent. Paste it once; it does not need
+# changing between matches, teams or rooms. Anyone who has it can report kills
+# as you, so treat it like a password and never share a config file containing
+# one.
+url = ""
 token = ""
 
 # Minimum gap between requests, in milliseconds. Kills that land close together

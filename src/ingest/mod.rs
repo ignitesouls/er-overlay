@@ -1060,8 +1060,9 @@ mod tests {
 
         let ingest = cfg.ingest.as_ref().expect("[ingest] section should be present");
         assert!(
-            !ingest.url.as_deref().unwrap_or("").is_empty(),
-            "the endpoint url should ship filled in, so only a token is needed"
+            ingest.url.as_deref().unwrap_or("").is_empty(),
+            "the shipped config must not point at any particular tracker - this is a \
+             general-purpose webhook, and the url belongs to whoever is running one"
         );
         assert!(
             ingest.token.as_deref().unwrap_or("").is_empty(),
