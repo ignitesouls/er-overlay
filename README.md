@@ -71,6 +71,11 @@ A few properties worth knowing:
   status quo. It will not affect the game.
 - Reloading a save or quitting to the menu is never treated as un-killing a
   boss.
+- **Language-independent.** Reports carry flag ids, never boss names, and every
+  localized `bosses.json` lists the same 207 flags. Setting `language` to
+  `frafr`, `jpnjp` or anything else changes what the boss list *reads* like and
+  nothing about what gets reported. The status line is ASCII, so it renders
+  whichever font your `charset` loads.
 
 When reporting is on and a match is live, one extra line appears in the HUD,
 straight from the server's own numbers:
