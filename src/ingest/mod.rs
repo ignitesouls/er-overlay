@@ -52,12 +52,17 @@ const TICK: Duration = Duration::from_millis(200);
 /// Skip reasons that are the expected result of the protocol working, not
 /// something to log.
 ///
-/// Both are the norm rather than the exception: we deliberately send the whole
-/// boss list, of which only a couple of dozen flags are ever squares
-/// (`not_on_this_board`), and we deliberately resend the full kill set every
-/// time (`already_fired`). Logging these would bury the interesting lines under
-/// a couple of hundred per heartbeat.
-const ROUTINE_SKIPS: [&str; 2] = ["already_fired", "not_on_this_board"];
+/// All three are the norm rather than the exception, because we deliberately
+/// send the whole boss list and deliberately resend the full kill set every
+/// time: most flags are not squares at all (`not_a_square`), some are squares
+/// that this board did not draw (`not_on_this_board`), and everything already
+/// dealt with comes back `already_fired`. Together they account for nearly
+/// every entry in `skipped`, so logging them would bury the interesting lines
+/// under a couple of hundred per heartbeat.
+///
+/// Deliberately *not* listed: `no_opponents` and `insert_failed`, which both
+/// mean a kill did not land and are worth seeing.
+const ROUTINE_SKIPS: [&str; 3] = ["already_fired", "not_on_this_board", "not_a_square"];
 
 //
 // ----------------------------------------------------
@@ -769,13 +774,14 @@ mod tests {
     }
 
     /// Captured verbatim from the live endpoint. Sending the whole boss list
-    /// means most flags come back `not_on_this_board`, and resending the kill
-    /// set means the rest come back `already_fired`; both are the protocol
-    /// working, so neither is logged.
+    /// means most flags come back `not_a_square` or `not_on_this_board`, and
+    /// resending the kill set means the rest come back `already_fired`; all are
+    /// the protocol working, so none of them is logged.
     #[test]
     fn routine_skips_are_not_noteworthy() {
         let raw = r#"{"ok":true,"fired":[],"skipped":[
             {"flag":31150800,"reason":"already_fired"},
+            {"flag":18000850,"reason":"not_a_square"},
             {"flag":1042360800,"reason":"not_on_this_board"}],
             "tally":{"hits":0,"misses":1,"shots":1,"accuracy":0}}"#;
         let r: IngestResponse = serde_json::from_str(raw).unwrap();
@@ -786,6 +792,14 @@ mod tests {
                 ROUTINE_SKIPS.contains(&s.reason.as_deref().unwrap()),
                 "{:?} should be treated as routine",
                 s.reason
+            );
+        }
+
+        // A kill that did not land must stay visible.
+        for noisy in ["no_opponents", "insert_failed"] {
+            assert!(
+                !ROUTINE_SKIPS.contains(&noisy),
+                "{noisy} means a kill was lost and must be logged"
             );
         }
 
