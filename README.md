@@ -1,4 +1,15 @@
-# er-overlay
+# er-overlay (legacy)
+
+This repository is archived and retained for historical releases and source
+history. Active public development has moved to
+[`psiphicode/er_overlay`](https://github.com/psiphicode/er_overlay):
+
+- [`main`](https://github.com/psiphicode/er_overlay/tree/main) is the
+  general-purpose overlay.
+- [`automark`](https://github.com/psiphicode/er_overlay/tree/automark) adds the
+  Elden Battleship automark integration.
+
+## Historical documentation
 
 This is an in-game overlay for ELDEN RING with the ability to track the following data:
 
